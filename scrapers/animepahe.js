@@ -93,18 +93,13 @@ class Animepahe {
         if (userProvidedCookies) {
             if (typeof userProvidedCookies === 'string' && userProvidedCookies.trim()) {
                 console.log('Using user-provided cookies');
+                Config.setCookies(userProvidedCookies.trim());
                 return userProvidedCookies.trim();
             } else {
                 throw new CustomError('Invalid user-provided cookies format', 400);
             }
         }
-        console.log('checking Config for cookies...');
-        if (Config.cookies && Config.cookies.trim()) {
-            console.log('Cookies found! Using cookies from Config');
-            return Config.cookies.trim();
-        }
 
-        // Try to read cookies from file
         let cookieData;
         try {
             cookieData = JSON.parse(await fs.readFile(this.cookiesPath, 'utf8'));
@@ -114,21 +109,20 @@ class Animepahe {
             cookieData = JSON.parse(await fs.readFile(this.cookiesPath, 'utf8'));
         }
 
-        // Check if cookies are stale
+        // Proactive background refresh if cookies are older than 13 days
         const ageInMs = Date.now() - cookieData.timestamp;
-        if (ageInMs > this.cookiesRefreshInterval && !this.isRefreshingCookies) {
+        if (ageInMs > (this.cookiesRefreshInterval - 24 * 60 * 60 * 1000) && !this.isRefreshingCookies) {
             this.isRefreshingCookies = true;
-            await this.refreshCookies()
+            this.refreshCookies()
                 .catch(err => console.error('Background cookie refresh failed:', err))
                 .finally(() => { this.isRefreshingCookies = false; });
         }
 
-        // Return current cookies (even if stale)
         const cookieHeader = cookieData.cookies
             .map(cookie => `${cookie.name}=${cookie.value}`)
             .join('; ');
         Config.setCookies(cookieHeader);
-        return Config.cookies;
+        return cookieHeader;
     }
 
     async fetchApiData(endpoint, params = {}, userProvidedCookies = null) {
