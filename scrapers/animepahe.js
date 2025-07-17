@@ -146,7 +146,6 @@ class Animepahe {
         }
     }
 
-    // API Methods - Fixed parameter passing
     async fetchAiringData(page = 1, userProvidedCookies = null) {
         return this.fetchApiData('/api', { m: 'airing', page }, userProvidedCookies);
     }
@@ -207,8 +206,7 @@ class Animepahe {
         }
 
         const url = Config.getUrl('play', id, episodeId);
-        const cookieHeader = await this.getCookies();
-        
+        let cookieHeader = await this.getCookies();
         try {
             const html = await RequestManager.fetch(url, cookieHeader);
             if (!html) {
@@ -216,6 +214,18 @@ class Animepahe {
             }
             return html;
         } catch (error) {
+            if (
+                error.response?.status === 403 ||
+                (error.message && error.message.includes('DDoS-Guard authentication required'))
+            ) {
+                await this.refreshCookies();
+                cookieHeader = await this.getCookies();
+                const html = await RequestManager.fetch(url, cookieHeader);
+                if (!html) {
+                    throw new CustomError('Failed to fetch play page after cookie refresh', 503);
+                }
+                return html;
+            }
             if (error.response?.status === 404) {
                 throw new CustomError('Anime or episode not found', 404);
             }
@@ -228,14 +238,28 @@ class Animepahe {
             throw new CustomError('URL is required', 400);
         }
 
-        const cookieHeader = await this.getCookies();
-        const html = await RequestManager.fetch(url, cookieHeader);
-
-        if (!html) {
-            throw new CustomError('Failed to fetch iframe', 503);
+        let cookieHeader = await this.getCookies();
+        try {
+            const html = await RequestManager.fetch(url, cookieHeader);
+            if (!html) {
+                throw new CustomError('Failed to fetch iframe', 503);
+            }
+            return html;
+        } catch (error) {
+            if (
+                error.response?.status === 403 ||
+                (error.message && error.message.includes('DDoS-Guard authentication required'))
+            ) {
+                await this.refreshCookies();
+                cookieHeader = await this.getCookies();
+                const html = await RequestManager.fetch(url, cookieHeader);
+                if (!html) {
+                    throw new CustomError('Failed to fetch iframe after cookie refresh', 503);
+                }
+                return html;
+            }
+            throw error;
         }
-
-        return html;
     }
     async getData(type, params, preferFetch = true) {
         try {
