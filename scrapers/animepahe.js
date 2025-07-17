@@ -118,7 +118,7 @@ class Animepahe {
         const ageInMs = Date.now() - cookieData.timestamp;
         if (ageInMs > this.cookiesRefreshInterval && !this.isRefreshingCookies) {
             this.isRefreshingCookies = true;
-            this.refreshCookies()
+            await this.refreshCookies()
                 .catch(err => console.error('Background cookie refresh failed:', err))
                 .finally(() => { this.isRefreshingCookies = false; });
         }
@@ -236,7 +236,8 @@ class Animepahe {
         }
 
         return html;
-    }    async getData(type, params, preferFetch = true) {
+    }
+    async getData(type, params, preferFetch = true) {
         try {
             if (preferFetch) {
                 switch (type) {
