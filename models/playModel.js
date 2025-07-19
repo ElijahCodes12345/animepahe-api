@@ -19,6 +19,8 @@ class PlayModel {
         if (results.data) {
             return DataProcessor.processApiData(results);
         }
+
+        console.log("PRESENT 1");
         
         return this.scrapePlayPage(results);
     }
@@ -46,6 +48,7 @@ class PlayModel {
     }
 
     static async getDownloadLinkList($) {
+        console.log("PRESENT 2.7");
         const downloadLinks = [];
         
         $('#pickDownload a').each((index, element) => {
@@ -93,6 +96,8 @@ class PlayModel {
             return []; 
         }
 
+        console.log("PRESENT 2.5");
+
         return resolutions;
     }
     
@@ -102,6 +107,8 @@ class PlayModel {
         if (!session || !provider) {
             throw new CustomError('Episode not found', 404);
         }
+
+        console.log("PRESENT 2");
 
         const $ = cheerio.load(pageHtml);        
         
@@ -141,10 +148,13 @@ class PlayModel {
             throw new CustomError('Failed to scrape play page data', 500);
         }
 
+        console.log("PRESENT 5");
+
         return playInfo;
     }
 
     static async processBatch(items, batchSize = 2, delayMs = 1000) {
+        console.log("PRESENT 3");
         const results = [];
         
         for (let i = 0; i < items.length; i += batchSize) {
@@ -167,6 +177,8 @@ class PlayModel {
                 await new Promise(resolve => setTimeout(resolve, delayMs));
             }
         }
+
+        console.log("PRESENT 4");
         
         return results;
     }

@@ -6,6 +6,7 @@ const queueRoutes = require('./routes/queueRoutes');
 const animeListRoutes = require('./routes/animeListRoutes');
 const animeInfoRoutes = require('./routes/animeInfoRoutes');
 const playRoutes = require('./routes/playRoutes');
+const testRoutes = require('./routes/testRoutes');
 const cache = require('./middleware/cache');
 
 const app = express();
@@ -29,6 +30,7 @@ app.use((req, res, next) => {
     next();
 });
 
+app.use('/api', testRoutes);
 app.use('/api', homeRoutes); // caching done in homeRoutes
 app.use('/api', cache(30), queueRoutes); // 30 seconds
 app.use('/api', cache(18000), animeListRoutes); // 1 hour

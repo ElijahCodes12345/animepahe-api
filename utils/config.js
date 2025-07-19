@@ -5,11 +5,17 @@ class Config {
     constructor() {
         this.hostUrl = '';
         this.baseUrl = 'https://animepahe.ru'; 
-        this.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36';
+        this.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
         this.cookies = '';
-        this.cookiesRefreshInterval = 14 * 24 * 60 * 60 * 1000; // Default to 14 days if not set by user 
+        this.cookiesRefreshInterval = 14 * 24 * 60 * 60 * 1000;
         this.proxies = [];
         this.proxyEnabled = false;
+        
+        // Environment-specific settings
+        this.isServerless = !!(process.env.VERCEL || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME);
+        this.maxRetries = this.isServerless ? 2 : 3;
+        this.requestTimeout = this.isServerless ? 15000 : 30000;
+        this.challengeTimeout = this.isServerless ? 15000 : 30000;
     }
 
     setHostUrl(protocol, host) {
