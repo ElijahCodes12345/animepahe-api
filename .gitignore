@@ -1,4 +1,5 @@
 .env
 node_modules/
 data/
+test.js
 .vercel
