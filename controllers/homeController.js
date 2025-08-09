@@ -4,7 +4,7 @@ const { CustomError } = require('../middleware/errorHandler');
 class HomeController {
     static async getAiringAnime(req, res, next) {
         try {
-            const page = req.query.page || 1;
+            const page = parseInt(req.query.page, 10) || 1; 
             const airingAnime = await HomeModel.getAiringAnime(page);
             
             if (!airingAnime) {
@@ -20,7 +20,7 @@ class HomeController {
     static async searchAnime(req, res, next) {
         try {
             const query = req.query.q;
-            const page = req.query.page || 1;
+            const page = parseInt(req.query.page, 10) || 1; 
             
             if (!query) {
                 throw new CustomError('Search query is required', 400);

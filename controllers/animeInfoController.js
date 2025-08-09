@@ -26,7 +26,7 @@ class AnimeInfoController {
         try {
             const animeId = req.params.id;
             const sort = req.query.sort || 'episode_desc';
-            const page = req.query.page || 1;
+            const page = parseInt(req.query.page, 10) || 1; 
 
             if (!animeId) {
                 throw new CustomError('Anime ID is required', 400);

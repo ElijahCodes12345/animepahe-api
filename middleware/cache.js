@@ -7,7 +7,17 @@ const cache = (duration) => async (req, res, next) => {
     }
 
     try {
-        const key = req.originalUrl;
+        // Build a normalized cache key: path + sorted query params
+        let key = req.path;
+        const queryKeys = Object.keys(req.query);
+        if (queryKeys.length > 0) {
+            const sortedQuery = queryKeys
+                .sort()
+                .map(k => `${encodeURIComponent(k)}=${encodeURIComponent(req.query[k])}`)
+                .join('&');
+            key += `?${sortedQuery}`;
+        }
+
         const cachedResponse = await redis.get(key);
 
         if (cachedResponse) {

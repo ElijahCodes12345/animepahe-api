@@ -20,11 +20,11 @@ class PlayModel {
             return DataProcessor.processApiData(results);
         }
         
-        return this.scrapePlayPage(results);
+        return this.scrapePlayPage(id, episodeId, results);
     }
 
-    static async scrapeIframe(url) {
-        const results = await Animepahe.getData("iframe", { url }, false);
+    static async scrapeIframe(id, episodeId, url) {
+        const results = await Animepahe.getData("iframe", { id, episodeId, url }, false);
         if (!results) {
             throw new CustomError('Failed to fetch iframe data', 503);
         }
@@ -52,7 +52,6 @@ class PlayModel {
             const link = $(element).attr('href');
             if (link) {
                 const fullText = $(element).text().trim();
-
                 const match = fullText.match(/(?:(\w+)\s*·\s*(\d+p)\s*\((\d+(?:\.\d+)?(?:MB|GB))\))(?:\s*(eng))?/i);
                 
                 downloadLinks.push({
@@ -64,10 +63,6 @@ class PlayModel {
                 });
             }
         });
-
-        if (downloadLinks.length === 0) {
-            return [];
-        }
 
         return downloadLinks;
     }
@@ -89,14 +84,10 @@ class PlayModel {
             }
         });
 
-        if (resolutions.length === 0) {
-            return []; 
-        }
-
         return resolutions;
     }
     
-    static async scrapePlayPage(pageHtml) {
+    static async scrapePlayPage(id, episodeId, pageHtml) {
         const [ session, provider ] = ['session', 'provider'].map(v => getJsVariable(pageHtml, v) || null);
 
         if (!session || !provider) {
@@ -131,43 +122,183 @@ class PlayModel {
                 isDub: res.isDub,
                 fanSub: res.fanSub
             }));
-            
-            const allSources = await this.processBatch(resolutionData);
-            playInfo.sources = allSources.flat();
 
+            let allSources = [];
+            try {
+                const isVercel = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+                
+                if (isVercel) {
+                    console.log('Running on Vercel - using sequential processing');
+                    allSources = await this.processSequential(id, episodeId, resolutionData);
+                } else {
+                    console.log('Running locally - using batch processing');
+                    allSources = await this.processBatch(id, episodeId, resolutionData);
+                }
+            } catch (iframeError) {
+                console.error('Error in scrapeIframe, returning partial data:', iframeError);
+                allSources = []; 
+            }
+
+            playInfo.sources = allSources.flat();
             playInfo.downloadLinks = await this.getDownloadLinkList($);
         } catch (error) {
             console.error('Error in scrapePlayPage:', error);
-            throw new CustomError('Failed to scrape play page data', 500);
+            playInfo.sources = playInfo.sources || [];
+            playInfo.downloadLinks = playInfo.downloadLinks || [];
         }
 
         return playInfo;
     }
 
-    static async processBatch(items, batchSize = 2, delayMs = 1000) {
+    // sequential processing for Vercel/serverless environments
+    static async processSequential(id, episodeId, items, delayMs = 2000) {
         const results = [];
+        const seenUrls = new Set();
         
-        for (let i = 0; i < items.length; i += batchSize) {
-            const batch = items.slice(i, i + batchSize);
-            const batchPromises = batch.map(async (data) => {
-                const sources = await this.scrapeIframe(data.url);
-                return sources.map(source => ({
+        const uniqueItems = items.filter(item => {
+            if (seenUrls.has(item.url)) {
+                console.log('Skipping duplicate URL:', item.url);
+                return false;
+            }
+            seenUrls.add(item.url);
+            return true;
+        });
+        
+        console.log(`Processing ${uniqueItems.length} items sequentially for better stability`);
+        
+        // Process first item to break Cloudflare
+        if (uniqueItems.length > 0) {
+            console.log('🔓 Breaking Cloudflare with first resolution...');
+            const firstItem = uniqueItems[0];
+            try {
+                const sources = await Animepahe.scrapeIframe(id, episodeId, firstItem.url);
+                const sourcesWithMeta = sources.map(source => ({
+                    ...source,
+                    resolution: firstItem.resolution,
+                    isDub: firstItem.isDub,
+                    fanSub: firstItem.fanSub
+                }));
+                results.push(sourcesWithMeta);
+                console.log('✅ Cloudflare broken, cookies extracted');
+                
+                // Wait before next request
+                if (uniqueItems.length > 1) {
+                    await new Promise(resolve => setTimeout(resolve, delayMs));
+                }
+            } catch (err) {
+                console.error('❌ Failed to process first resolution:', err.message);
+                return []; 
+            }
+        }
+
+        // Process remaining items with fast cookie method
+        for (let i = 1; i < uniqueItems.length; i++) {
+            const data = uniqueItems[i];
+            try {
+                let sources;
+                if (Animepahe.cloudflareSessionCookies) {
+                    try {
+                        console.log(`Processing ${data.resolution} with fast cookie method...`);
+                        sources = await Animepahe.scrapeIframeWithExtractedCookies(data.url);
+                        console.log('✅ Used fast cookie method for:', data.resolution);
+                    } catch (cookieError) {
+                        console.warn('Cookie method failed, falling back to full scrape:', cookieError.message);
+                        sources = await Animepahe.scrapeIframe(id, episodeId, data.url);
+                    }
+                } else {
+                    sources = await Animepahe.scrapeIframe(id, episodeId, data.url);
+                }
+                
+                const sourcesWithMeta = sources.map(source => ({
                     ...source,
                     resolution: data.resolution,
                     isDub: data.isDub,
                     fanSub: data.fanSub
                 }));
-            });
+                results.push(sourcesWithMeta);
+                
+                // Wait between requests
+                if (i < uniqueItems.length - 1) {
+                    const delay = Animepahe.cloudflareSessionCookies ? delayMs / 2 : delayMs;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            } catch (err) {
+                console.error(`Failed to scrape iframe for ${data.resolution}:`, err.message);
+            }
+        }
 
+        console.log(`✅ Processed ${results.length} resolution sources total`);
+        return results;
+    }
+
+    // Original batch processing for local environments
+    static async processBatch(id, episodeId, items, batchSize = 3, delayMs = 500) {
+        const results = [];
+        const seenUrls = new Set(); 
+        
+        const uniqueItems = items.filter(item => {
+            if (seenUrls.has(item.url)) {
+                console.log('Skipping duplicate URL:', item.url);
+                return false;
+            }
+            seenUrls.add(item.url);
+            return true;
+        });
+        
+        console.log(`Processing ${uniqueItems.length} unique items with cookie-sharing optimization`);
+        
+        // Process first item with browser to break Cloudflare and extract cookies
+        if (uniqueItems.length > 0) {
+            console.log('🔓 Breaking Cloudflare with first resolution...');
+            const firstItem = uniqueItems[0];
+            try {
+                await Animepahe.scrapeIframe(id, episodeId, firstItem.url);
+                console.log('✅ Cloudflare broken, cookies extracted');
+            } catch (err) {
+                console.error('❌ Failed to process first resolution:', err.message);
+                return []; 
+            }
+        }
+
+        // Now process ALL items (including the first) using the fast cookie method
+        for (let i = 0; i < uniqueItems.length; i += batchSize) {
+            const batch = uniqueItems.slice(i, i + batchSize);
+            const batchPromises = batch.map(async (data) => {
+                try {
+                    let sources;
+                    if (Animepahe.cloudflareSessionCookies) {
+                        try {
+                            console.log('Fetching iframe for:', data.url);
+                            sources = await Animepahe.scrapeIframeWithExtractedCookies(data.url);
+                            console.log('✅ Used fast cookie method for:', data.resolution);
+                        } catch (cookieError) {
+                            console.warn('Cookie method failed, falling back to full scrape:', cookieError.message);
+                            sources = await Animepahe.scrapeIframe(id, episodeId, data.url);
+                        }
+                    } else {
+                        sources = await Animepahe.scrapeIframe(id, episodeId, data.url);
+                    }
+                    return sources.map(source => ({
+                        ...source,
+                        resolution: data.resolution,
+                        isDub: data.isDub,
+                        fanSub: data.fanSub
+                    }));
+                } catch (err) {
+                    console.error('Failed to scrape iframe for:', data.url, err.message);
+                    return [];
+                }
+            });
             const batchResults = await Promise.all(batchPromises);
             results.push(...batchResults);
 
-            // delay between batches
-            if (i + batchSize < items.length) {
-                await new Promise(resolve => setTimeout(resolve, delayMs));
+            if (i + batchSize < uniqueItems.length) {
+                const delay = Animepahe.cloudflareSessionCookies ? delayMs / 2 : delayMs;
+                await new Promise(resolve => setTimeout(resolve, delay));
             }
         }
-        
+
+        console.log(`✅ Processed ${results.length} resolution sources total`);
         return results;
     }
 }
