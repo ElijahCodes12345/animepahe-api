@@ -11,5 +11,5 @@
       "src": "/api/(.*)",
       "dest": "/api/index.js"
     }
-  ]
+  ] 
 }

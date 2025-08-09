@@ -117,14 +117,11 @@ class RequestManager {
     
     static async rawRequest(url, options = {}) {
         try {
-            console.log("BEFOREE");
             return await axios.get(url, options);
         } catch (err) {
             throw err;
         }
     }
-
-    // Add this method to your RequestManager class
 
     static async fetchCloudflareProtected(url, options = {}) {
         console.log('Fetching Cloudflare-protected content from:', url);
@@ -160,9 +157,7 @@ class RequestManager {
             const context = await browser.newContext(contextOptions);
             const page = await context.newPage();
 
-            // Enhanced stealth for Cloudflare
             await page.addInitScript(() => {
-                // Remove webdriver traces
                 Object.defineProperty(navigator, 'webdriver', { get: () => false });
                 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
                 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
@@ -236,7 +231,6 @@ class RequestManager {
             console.log('Cloudflare challenge detected, waiting for resolution...');
             
             try {
-                // Wait for challenge to complete (up to 30 seconds)
                 await page.waitForFunction(() => {
                     const title = document.title.toLowerCase();
                     const url = window.location.href;
@@ -304,7 +298,7 @@ class RequestManager {
                 } : false
             });
 
-            console.log("response Data", response.data);
+            // console.log("response Data", response.data);
 
             const responseText = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
             if (responseText.includes('DDoS-GUARD') || 
