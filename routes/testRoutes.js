@@ -1,6 +1,10 @@
 const express = require('express');
 const router = express.Router();
+const TestController = require('../controllers/testController');
 const { launchBrowser } = require('../utils/browser');
+
+
+router.get('/kwik-test', TestController.resolveKwik);
 
 router.get('/test', async (req, res) => {
     try {
@@ -95,7 +99,7 @@ router.get('/test', async (req, res) => {
         // Enhanced route interception with better headers
         await page.route('**/kwik.si/e/**', async (route) => {
             const url = route.request().url();
-            console.log('🎯 Intercepting kwik route:', url);
+            console.log('Intercepting kwik route:', url);
             kwikUrl = url;
             
             try {
@@ -118,7 +122,7 @@ router.get('/test', async (req, res) => {
                 const responseText = await response.text();
                 
                 if (responseText.includes('Just a moment') || responseText.includes('challenge')) {
-                    console.log('⚠️ Received Cloudflare challenge, trying alternative approach...');
+                    console.log('Received Cloudflare challenge, trying alternative approach...');
                     
                     await route.continue();
                     
@@ -139,7 +143,7 @@ router.get('/test', async (req, res) => {
                             
                             if (delayedResponse && !delayedResponse.includes('Just a moment')) {
                                 kwikResponse = delayedResponse;
-                                console.log('✅ Successfully bypassed Cloudflare via delayed fetch');
+                                console.log('Successfully bypassed Cloudflare via delayed fetch');
                             }
                         } catch (err) {
                             console.error('Delayed fetch failed:', err.message);
@@ -148,7 +152,7 @@ router.get('/test', async (req, res) => {
                     
                 } else {
                     kwikResponse = responseText;
-                    console.log('✅ Captured kwik response via route interception');
+                    console.log('Captured kwik response via route interception');
                     
                     await route.fulfill({
                         response: response
@@ -178,7 +182,7 @@ router.get('/test', async (req, res) => {
             
             // Try alternative approach if we're waiting too long
             if (elapsed === 20000 && kwikUrl && !kwikResponse) {
-                console.log('🔄 Trying direct iframe navigation...');
+                console.log('Trying direct iframe navigation...');
                 try {
                     // Navigate to the kwik URL directly in a new page
                     const kwikPage = await context.newPage();
@@ -190,7 +194,7 @@ router.get('/test', async (req, res) => {
                     const content = await kwikPage.content();
                     if (!content.includes('Just a moment')) {
                         kwikResponse = content;
-                        console.log('✅ Successfully got content via direct navigation');
+                        console.log('Successfully got content via direct navigation');
                         console.log("Cookies", cookies);
                     }
                     

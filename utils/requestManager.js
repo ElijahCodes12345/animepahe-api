@@ -1,9 +1,8 @@
 const { launchBrowser } = require('./browser');
-const cheerio = require('cheerio');
+const cloudscraper = require('cloudscraper');
 const axios = require('axios');
 const Config = require('./config');
 const { CustomError } = require('../middleware/errorHandler');
-const config = require('./config');
 
 class RequestManager {
     static async fetch(url, cookieHeader, type = 'default') {
@@ -15,6 +14,30 @@ class RequestManager {
             console.trace('Invalid fetch type specified. Please use "json", "heavy", or "default".');
             return null;
         }
+    }
+
+    static async scrapeWithCloudScraper(url) {
+        console.log(`Fetching HTML from ${url}...`);
+    
+        const html = await cloudscraper.get(url, {
+        headers: {
+            Referer: Config.baseUrl,
+            'User-Agent': Config.userAgent,
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Sec-Fetch-*': '?', 
+            "dnt": "1",
+            "sec-ch-ua": '"Not A(Brand";v="99", "Microsoft Edge";v="121", "Chromium";v="121"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "x-requested-with": "XMLHttpRequest"
+        }, timeout: 20000,
+        });
+
+        return html;    
     }
 
     static async scrapeWithPlaywright(url) {
@@ -199,7 +222,7 @@ class RequestManager {
     static async handleCloudflareChallenge(page) {
         console.log('Checking for Cloudflare challenge...');
         
-        // Wait a bit for any immediate redirects
+        // for any immediate redirects
         await page.waitForTimeout(3000);
         
         // Check for various challenge indicators
@@ -312,7 +335,7 @@ class RequestManager {
             return response.data;
         } catch (error) {
             if (error.response?.status === 403) {
-                console.log(config.cookies);
+                console.log(Config.cookies);
                 // Let Animepahe handle the cookie refresh
                 throw new CustomError('DDoS-Guard authentication required, invalid cookies', 403);
             }

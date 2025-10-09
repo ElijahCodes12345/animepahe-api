@@ -4,7 +4,7 @@ dotenv.config();
 class Config {
     constructor() {
         this.hostUrl = '';
-        this.baseUrl = 'https://animepahe.ru'; 
+        this.baseUrl = 'https://animepahe.si'; 
         this.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
         this.extraHTTPHeaders = {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
@@ -21,9 +21,9 @@ class Config {
         
         // Environment-specific settings
         this.isServerless = !!(process.env.VERCEL || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME);
-        this.maxRetries = this.isServerless ? 2 : 3;
-        this.requestTimeout = this.isServerless ? 15000 : 30000;
-        this.challengeTimeout = this.isServerless ? 15000 : 30000;
+        this.maxRetries = this.isServerless ? 1 : 3; // Reduced retries on Vercel
+        this.requestTimeout = this.isServerless ? 10000 : 30000; // Reduced timeout on Vercel
+        this.challengeTimeout = this.isServerless ? 10000 : 30000; // Reduced timeout on Vercel
     }
 
     setHostUrl(protocol, host) {

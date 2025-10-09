@@ -248,62 +248,67 @@ class Animepahe {
         }
     }
 
+    // Separate method to fetch iframe HTML without circular dependency
+    async fetchIframeHtml(id, episodeId, url) {
+        if (!url) {
+            throw new CustomError('URL is required', 400);
+        }
+
+        console.log('Initiating iframe HTML fetch:', url);
+
+        // Define all available strategies
+        // To add more strategies in the future, add them to this array:
+        const allStrategies = [
+            () => this.scrapeIframeLight(url),
+            // () => this.scrapeIframeHeavy(Config.getUrl('play', id, episodeId), url),
+        ];
+
+        // Process strategies in parallel, max 2 at a time
+        const maxParallel = 2;
+        
+        for (let i = 0; i < allStrategies.length; i += maxParallel) {
+            const batch = allStrategies.slice(i, i + maxParallel);
+            console.log(`Trying ${batch.length} strategies in parallel (batch ${Math.floor(i / maxParallel) + 1}/${Math.ceil(allStrategies.length / maxParallel)})...`);
+            
+            const promises = batch.map(async (strategy, idx) => {
+                try {
+                    console.log(`Starting strategy ${i + idx + 1} in parallel...`);
+                    const result = await strategy();
+                    if (result && result.length > 100) {
+                        console.log(`Strategy ${i + idx + 1} succeeded`);
+                        return { success: true, result, strategyIndex: i + idx };
+                    }
+                    return { success: false, error: 'Result too short', strategyIndex: i + idx };
+                } catch (error) {
+                    console.warn(`Strategy ${i + idx + 1} failed:`, error.message);
+                    return { success: false, error: error.message, strategyIndex: i + idx };
+                }
+            });
+
+            const results = await Promise.all(promises);
+            
+            // Check if any strategy in the batch succeeded
+            const successfulResult = results.find(r => r.success);
+            if (successfulResult) {
+                return successfulResult.result;
+            }
+        }
+
+        // If all strategies failed, throw error with all failure details
+        throw new CustomError('All iframe fetching strategies failed', 503);
+    }
+
     async scrapeIframe(id, episodeId, url) {
         if (!url) {
             throw new CustomError('URL is required', 400);
         }
 
-        console.log('Fetching iframe URL:', url);
-        const playPageUrl = Config.getUrl('play', id, episodeId);
-
-        const strategies = [
-            () => this.scrapeIframeWithAxios(url),
-            () => this.scrapeIframeWithPlaywright(playPageUrl, url),
-            () => this.scrapeIframeWithRetry(url)
-        ];
-
-        let lastError = null;
-
-        for (let i = 0; i < strategies.length; i++) {
-            try {
-                console.log(`Attempting strategy ${i + 1}/${strategies.length}`);
-                const htmlResult = await strategies[i]();
-                if (htmlResult && htmlResult.length > 100) {
-                    console.log(`Strategy ${i + 1} succeeded`);
-                    
-                    const sources = this.extractSourcesFromIframeHtml(htmlResult);
-                    return sources;
-                }
-            } catch (error) {
-                console.warn(`Strategy ${i + 1} failed:`, error.message);
-                lastError = error;
-                
-                // Wait before trying next strategy
-                if (i < strategies.length - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                }
-            }
-        }
-
-        throw new CustomError(lastError?.message || 'All iframe fetching strategies failed', 503);
-    }
-
-    // NEW: Extract sources from iframe HTML (moved from PlayModel)
-    extractSourcesFromIframeHtml(iframeHtml) {
-        const execResult = /(eval)(\(f.*?)(\n<\/script>)/s.exec(iframeHtml);
-        if (!execResult) {
-            throw new CustomError('Failed to extract source from iframe', 500);
-        }
-
-        const source = eval(execResult[2].replace('eval', '')).match(/https.*?m3u8/);
-        if (!source) {
-            throw new CustomError('Failed to extract m3u8 URL', 500);
-        }
-
-        return [{
-            url: source[0] || null,
-            isM3U8: source[0].includes('.m3u8') || false,
-        }];
+        // Fetch the HTML using our internal method
+        const htmlResult = await this.fetchIframeHtml(id, episodeId, url);
+        
+        // Import PlayModel to handle just the extraction part
+        const PlayModel = require('../models/playModel');
+        return PlayModel.extractSources(htmlResult, url);
     }
 
     async extractCloudflareSessionCookies(context) {
@@ -323,7 +328,7 @@ class Animepahe {
                     .map(cookie => `${cookie.name}=${cookie.value}`)
                     .join('; ');
                 
-                console.log('🍪 Extracted Cloudflare session cookies:', 
+                console.log('Extracted Cloudflare session cookies:', 
                     relevantCookies.map(c => c.name).join(', '));
                 
                 this.cloudflareSessionCookies = {
@@ -339,405 +344,21 @@ class Animepahe {
         }
         return null;
     }
-
-    async scrapeIframeWithExtractedCookies(url) {
-        if (!this.cloudflareSessionCookies) {
-            throw new Error('No Cloudflare session cookies available');
-        }
-
-        // check if cookies are still fresh (default 30 minutes)
-        const cookieAge = Date.now() - this.cloudflareSessionCookies.timestamp;
-        if (cookieAge > 30 * 60 * 1000) {
-            console.log('⚠️ Cookies are older than 30 minutes, may need refresh');
-            this.cloudflareSessionCookies = null;
-            throw new Error('Cookies too old');
-        }
-
-        console.log('🚀 Using extracted cookies for fast Axios request:', url);
-        
-        const headers = {
-            'User-Agent': Config.userAgent,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Cache-Control': 'no-cache',
-            'Referer': Config.getUrl('home'),
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Cookie': this.cloudflareSessionCookies.header,
-            'Sec-Fetch-Dest': 'iframe',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'cross-site',
-            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"Windows"'
-        };
-
+ 
+    async scrapeIframeLight(url) {
         try {
-            const response = await RequestManager.rawRequest(url, {
-                headers,
-                timeout: 15000,
-                validateStatus: status => status < 500
-            });
-
-            const html = response.data;
-
-            console.log(`${url}: ${html}`);
-            
-            if (html && html.length > 100 && 
-                !html.toLowerCase().includes('just a moment') &&
-                !html.toLowerCase().includes('checking your browser') &&
-                !html.toLowerCase().includes('challenge')) {
-                console.log('✅ Fast cookie request successful for:', url);
-                
-                // Process HTML and return sources array
-                return this.extractSourcesFromIframeHtml(html);
-            }
-
-            throw new Error('Response appears to be blocked or invalid');
-            
-        } catch (error) {
-            console.warn('❌ Fast cookie request failed:', error.message);
-            throw error;
-        }
-    }
-
-    async scrapeIframeWithPlaywright(animepaheUrl, targetKwikUrl = null, maxRetries = 2) {
-        console.log('Trying enhanced Playwright method for:', animepaheUrl);
-        if (targetKwikUrl) {
-            console.log('Target kwik URL:', targetKwikUrl);
-        }
-        
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            let browser = null;
-            try {
-                browser = await launchBrowser();
-                const context = await browser.newContext({
-                    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    viewport: { width: 1280, height: 800 },
-                    javaScriptEnabled: true,
-                    extraHTTPHeaders: {
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Accept-Encoding': 'gzip, deflate, br',
-                        'DNT': '1',
-                        'Connection': 'keep-alive',
-                        'Upgrade-Insecure-Requests': '1',
-                    }
-                });
-
-                const page = await context.newPage();
-
-                await page.addInitScript(() => {
-                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                    Object.defineProperty(navigator, 'plugins', { 
-                        get: () => [
-                            { name: 'Chrome PDF Plugin' },
-                            { name: 'Chrome PDF Viewer' },
-                            { name: 'Native Client' }
-                        ] 
-                    });
-                    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                    window.chrome = { runtime: {} };
-                    const originalQuery = window.navigator.permissions.query;
-                    window.navigator.permissions.query = (parameters) => (
-                        parameters.name === 'notifications' ?
-                            Promise.resolve({ state: Notification.permission }) :
-                            originalQuery(parameters)
-                    );
-                    Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
-                    Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
-                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
-                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
-                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
-                });
-
-                await page.route('**/*', (route) => {
-                    const url = route.request().url();
-                    if (/ads|doubleclick|popunder|popads|brunetsmolted|duelistdoesnt|kryptonnutlet|whitebit|garsilgilpey|analytics|googletagmanager|facebook|twitter/.test(url)) {
-                        return route.abort();
-                    }
-                    route.continue();
-                });
-
-                console.log(`Attempt ${attempt}: Navigating to Animepahe...`);
-                await page.goto(animepaheUrl, { waitUntil: 'networkidle', timeout: 60000 });
-                
-                await page.waitForTimeout(3000);
-
-                let kwikResponse = null;
-                let kwikUrl = null;
-                let cookiesExtracted = false;
-
-                await page.route('**/kwik.si/e/**', async (route) => {
-                    const url = route.request().url();
-                    const urlId = url.split('kwik.si/e/')[1]?.split('?')[0];
-                    
-                    // If we have a specific target, only intercept that URL
-                    if (targetKwikUrl) {
-                        const targetId = targetKwikUrl.split('kwik.si/e/')[1]?.split('?')[0];
-                        if (urlId !== targetId) {
-                            console.log(`Skipping non-target kwik URL: ${urlId} (target: ${targetId})`);
-                            return route.continue();
-                        }
-                    }
-                    
-                    console.log('🎯 Intercepting kwik route:', url);
-                    kwikUrl = url;
-                    
-                    try {
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                        
-                        const response = await route.fetch({
-                            headers: {
-                                ...route.request().headers(),
-                                'Referer': animepaheUrl,
-                                'Origin': 'https://animepahe.ru',
-                                'Sec-Fetch-Dest': 'iframe',
-                                'Sec-Fetch-Mode': 'navigate',
-                                'Sec-Fetch-Site': 'cross-site',
-                                'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-                                'Sec-Ch-Ua-Mobile': '?0',
-                                'Sec-Ch-Ua-Platform': '"Windows"',
-                            }
-                        });
-
-                        const responseText = await response.text();
-                        
-                        if (responseText.includes('Just a moment') || responseText.includes('challenge')) {
-                            console.log('⚠️ Received Cloudflare challenge, waiting for bypass...');
-                            await route.continue();
-                            
-                            setTimeout(async () => {
-                                try {
-                                    const delayedResponse = await page.evaluate(async (url) => {
-                                        const response = await fetch(url, {
-                                            headers: {
-                                                'User-Agent': navigator.userAgent,
-                                                'Referer': window.location.href,
-                                                'Accept': '*/*',
-                                                'Accept-Language': 'en-US,en;q=0.9',
-                                                'Cache-Control': 'no-cache'
-                                            }
-                                        });
-                                        return await response.text();
-                                    }, url);
-                                    
-                                    if (delayedResponse && !delayedResponse.includes('Just a moment')) {
-                                        kwikResponse = delayedResponse;
-                                        console.log('✅ Successfully bypassed Cloudflare via delayed fetch');
-                                        
-                                        if (!cookiesExtracted) {
-                                            await this.extractCloudflareSessionCookies(context);
-                                            cookiesExtracted = true;
-                                        }
-                                    }
-                                } catch (err) {
-                                    console.error('Delayed fetch failed:', err.message);
-                                }
-                            }, 5000);
-                            
-                        } else {
-                            kwikResponse = responseText;
-                            console.log('✅ Captured kwik response via route interception');
-                            
-                            if (!cookiesExtracted) {
-                                await this.extractCloudflareSessionCookies(context);
-                                cookiesExtracted = true;
-                            }
-                            
-                            await route.fulfill({
-                                response: response
-                            });
-                        }
-                        
-                    } catch (err) {
-                        console.error('Route interception failed:', err.message);
-                        route.continue();
-                    }
-                });
-
-                if (targetKwikUrl) {
-                    console.log('Navigating directly to target kwik URL in iframe...');
-                    await page.evaluate((url) => {
-                        const iframe = document.createElement('iframe');
-                        iframe.src = url;
-                        iframe.style.display = 'none';
-                        document.body.appendChild(iframe);
-                    }, targetKwikUrl);
-                } else {
-                    // Original behavior: click the load button
-                    await page.waitForSelector('.click-to-load .reload', { timeout: 45000 });
-                    await page.click('.click-to-load .reload');
-                    console.log('✅ Clicked load button, waiting for kwik response...');
-                }
-
-                // Wait for response
-                const maxWait = 60000; 
-                const interval = 2000;
-                let elapsed = 0;
-
-                while (!kwikResponse && elapsed < maxWait) {
-                    await page.waitForTimeout(interval);
-                    elapsed += interval;
-                    console.log(`Waiting for kwik response... ${elapsed / 1000}s`);
-                    
-                    if (elapsed === 20000 && kwikUrl && !kwikResponse) {
-                        console.log('🔄 Trying direct iframe navigation...');
-                        try {
-                            const kwikPage = await context.newPage();
-                            await kwikPage.goto(kwikUrl, { waitUntil: 'networkidle', timeout: 30000 });
-                            await kwikPage.waitForTimeout(10000);
-                            
-                            const content = await kwikPage.content();
-                            if (!content.includes('Just a moment')) {
-                                kwikResponse = content;
-                                console.log('✅ Successfully got content via direct navigation');
-                                
-                                if (!cookiesExtracted) {
-                                    await this.extractCloudflareSessionCookies(context);
-                                    cookiesExtracted = true;
-                                }
-                            }
-                            
-                            await kwikPage.close();
-                        } catch (err) {
-                            console.error('Direct navigation failed:', err.message);
-                        }
-                    }
-                }
-
-                await context.close();
-
-                if (!kwikResponse) {
-                    throw new Error(`kwik response not captured within time limit. URL detected: ${kwikUrl || 'none'}`);
-                }
-
-                if (kwikResponse.includes('Just a moment') || kwikResponse.includes('Checking your browser')) {
-                    throw new Error('Cloudflare challenge still active after bypass attempts');
-                }
-
-                console.log(`✅ Playwright method successful on attempt ${attempt}`);
-                console.log('🍪 Cookies extraction status:', cookiesExtracted ? 'SUCCESS' : 'FAILED');
-                
-                return kwikResponse;
-
-            } catch (error) {
-                console.warn(`Playwright attempt ${attempt} failed:`, error.message);
-                if (attempt === maxRetries) {
-                    throw new Error(`All Playwright attempts failed. Last error: ${error.message}`);
-                }
-                
-                await new Promise(resolve => setTimeout(resolve, 5000));
-            } finally {
-                if (browser) {
-                    await browser.close();
-                }
-            }
-        }
-    }
-    
-    async scrapeIframeWithAxios(url) {
-        console.log('Trying Axios fallback for:', url);
-        
-        const headers = {
-            'User-Agent': Config.userAgent,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Cache-Control': 'no-cache',
-            'Referer': Config.getUrl('home'),
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        };
-
-        try {
-            // Step 1: Get initial cookies
-            const firstResponse = await RequestManager.rawRequest(url, {
-                headers,
-                maxRedirects: 0,
-                validateStatus: status => status < 400 || status === 302,
-                timeout: 15000
-            });
-
-            let cookies = '';
-            const setCookieHeader = firstResponse.headers['set-cookie'];
-            if (setCookieHeader) {
-                cookies = setCookieHeader.map(c => c.split(';')[0]).join('; ');
-            }
-
-            // Step 2: Make request with cookies
-            const finalResponse = await RequestManager.rawRequest(url, {
-                headers: {
-                    ...headers,
-                    ...(cookies && { 'Cookie': cookies })
-                },
-                timeout: 15000,
-                validateStatus: status => status < 500
-            });
-
-            const html = finalResponse.data;
+            const html = await RequestManager.scrapeWithCloudScraper(url);
             
             if (html && html.length > 100 && 
                 !html.toLowerCase().includes('just a moment') &&
                 !html.toLowerCase().includes('checking your browser')) {
-                console.log('Axios fallback successful');
                 return html;
             }
-
-            throw new Error('Axios response blocked or invalid');
             
+            throw new Error('Response blocked or invalid');
         } catch (error) {
             console.warn('Axios fallback failed:', error.message);
             throw error;
-        }
-    }
-
-    async scrapeIframeWithRetry(url, maxRetries = 1) {
-        console.log('Final retry strategy for:', url);
-        
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            try {
-                // Simple delay-based retry with minimal browser
-                const browser = await launchBrowser();
-                
-                try {
-                    const context = await browser.newContext({
-                        userAgent: Config.userAgent,
-                        ignoreHTTPSErrors: true
-                    });
-                    
-                    const page = await context.newPage();
-                    
-                    // Very minimal approach
-                    await page.goto(url, { 
-                        waitUntil: 'networkidle', 
-                        timeout: 20000 
-                    });
-                    
-                    // Longer wait in hope challenge completes
-                    await page.waitForTimeout(8000);
-                    
-                    const html = await page.content();
-                    await context.close();
-                    
-                    if (html && html.length > 100) {
-                        console.log('Retry strategy successful');
-                        return html;
-                    }
-                    
-                    throw new Error('Invalid content from retry');
-                    
-                } finally {
-                    await browser.close();
-                }
-                
-            } catch (error) {
-                console.warn(`Retry attempt ${attempt} failed:`, error.message);
-                if (attempt === maxRetries) throw error;
-                
-                await new Promise(resolve => setTimeout(resolve, 5000));
-            }
         }
     }
     
