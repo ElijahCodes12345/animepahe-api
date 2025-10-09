@@ -128,6 +128,9 @@ The API returns errors in this format:
 - @sparticuz/chromium
 - Cheerio
 - Axios
+- cloudscraper
+- jsdom
+- vm
 
 ## License
 
