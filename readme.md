@@ -45,6 +45,22 @@ COOKIES=     # Optional - for manual cookie management
 USE_PROXY=false
 PROXIES=     # Optional - comma-separated proxy URLs
 REDIS_URL=   # Optional - Redis connection URL for caching (e.g., redis://user:pass@host:port)
+ALLOWED_ORIGINS= # Optional - CORS configuration (see below)
+```
+
+### CORS Configuration
+
+By default, the API will allow requests from **all origins** (`*`). To restrict access to specific domains:
+
+```env
+# Allow all origins (default)
+ALLOWED_ORIGINS=*
+
+# Allow single origin
+ALLOWED_ORIGINS=http://localhost:5173
+
+# Allow multiple origins (comma-separated)
+ALLOWED_ORIGINS=http://localhost:5173,https://mywebsite.com,https://another-site.com
 ```
 
 ### Redis Caching

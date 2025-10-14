@@ -1,4 +1,5 @@
 const express = require('express');
+const cors = require('cors');
 const Config = require('./utils/config');
 const { errorHandler, CustomError } = require('./middleware/errorHandler');
 const homeRoutes = require('./routes/homeRoutes');
@@ -12,7 +13,6 @@ const cache = require('./middleware/cache');
 const app = express();
 
 // Load environment variables into Config
-
 try {
     Config.validate();
     Config.loadFromEnv();
@@ -21,6 +21,32 @@ try {
     console.error(error.message);
     process.exit(1); 
 }
+
+// CORS Configuration
+const corsOptions = {
+    origin: function (origin, callback) {
+        if (!origin) return callback(null, true);
+        
+        const allowedOrigins = process.env.ALLOWED_ORIGINS 
+            ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+            : ['*']; // Default: allow all origins
+        
+        if (allowedOrigins.includes('*')) {
+            return callback(null, true);
+        }
+        
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+};
+
+app.use(cors(corsOptions));
 
 // Middleware to set hostUrl ONCE based on first incoming request
 app.use((req, res, next) => {
@@ -48,7 +74,7 @@ app.use((req, res, next) => {
 // Error handling middleware
 app.use(errorHandler);
 
-const PORT =  process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`API running on http://localhost:${PORT}`);
 });

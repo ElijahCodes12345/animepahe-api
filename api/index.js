@@ -1,4 +1,5 @@
 const express = require('express');
+const cors = require('cors');
 const Config = require('../utils/config');
 const { errorHandler, CustomError } = require('../middleware/errorHandler');
 const homeRoutes = require('../routes/homeRoutes');
@@ -20,6 +21,32 @@ try {
     console.error(error.message);
     throw error;
 }
+
+// CORS Configuration
+const corsOptions = {
+    origin: function (origin, callback) {
+        if (!origin) return callback(null, true);
+        
+        const allowedOrigins = process.env.ALLOWED_ORIGINS 
+            ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+            : ['*']; // Default: allow all origins
+        
+        if (allowedOrigins.includes('*')) {
+            return callback(null, true);
+        }
+        
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+};
+
+app.use(cors(corsOptions));
 
 // Middleware to set hostUrl
 app.use((req, res, next) => {
