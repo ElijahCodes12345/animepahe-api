@@ -6,6 +6,8 @@ const { launchBrowser } = require('../utils/browser');
 
 router.get('/kwik-test', TestController.resolveKwik);
 
+router.get('/downlod-test', TestController.download);
+
 router.get('/test', async (req, res) => {
     try {
         const playPageUrl = 'https://animepahe.ru/play/9a16dfb8-8ffc-a0b0-6508-1b291afa04a7/b3a2934c2694eb256d0258ea1fea00dbf620eddd57cbadb97bec7019dc18dcc9';

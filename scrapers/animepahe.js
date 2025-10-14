@@ -1,11 +1,14 @@
 const fs = require('fs').promises;
 const path = require('path');
 const Config = require('../utils/config');
+const { JSDOM } = require('jsdom');
+const vm = require('vm')
 const RequestManager = require("../utils/requestManager");
 const { launchBrowser } = require('../utils/browser');
 const { CustomError } = require('../middleware/errorHandler');
 const os = require('os');
-const { config } = require('dotenv');
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 class Animepahe {
     constructor() {
@@ -16,7 +19,7 @@ class Animepahe {
         this.activeBrowser = null;
         this.cloudflareSessionCookies = null
 
-        // Add tracking for current kwik request
+        // tracking for current kwik request
         this.currentKwikRequest = null;
     }
 
@@ -248,7 +251,6 @@ class Animepahe {
         }
     }
 
-    // Separate method to fetch iframe HTML without circular dependency
     async fetchIframeHtml(id, episodeId, url) {
         if (!url) {
             throw new CustomError('URL is required', 400);
@@ -256,7 +258,6 @@ class Animepahe {
 
         console.log('Initiating iframe HTML fetch:', url);
 
-        // Define all available strategies
         // To add more strategies in the future, add them to this array:
         const allStrategies = [
             () => this.scrapeIframeLight(url),
@@ -303,12 +304,280 @@ class Animepahe {
             throw new CustomError('URL is required', 400);
         }
 
-        // Fetch the HTML using our internal method
         const htmlResult = await this.fetchIframeHtml(id, episodeId, url);
         
-        // Import PlayModel to handle just the extraction part
         const PlayModel = require('../models/playModel');
         return PlayModel.extractSources(htmlResult, url);
+    }
+
+    async scrapeDownloadLinks(url) {
+        if (!url) {
+            throw new CustomError('URL is required', 400);
+        }
+
+        const resolvedUrl = await this.extractKwikUrl(url);
+        if (!resolvedUrl) {
+            // If can't extract the URL, try the original URL
+            const downloadUrl = await this.getKwikDownloadUrl(url);
+            return { downloadUrl, type: 'direct_download' };
+        }
+        
+        console.log('Found Kwik URL:', resolvedUrl);
+        
+        // Use the extracted URL for getting the download link
+        const downloadUrl = await this.getKwikDownloadUrl(resolvedUrl);
+        return { downloadUrl, type: 'redirected_download', originalUrl: url, resolvedUrl };
+    }
+
+    async extractKwikUrl(url) {
+        try {
+            console.log('[Step 1] Fetching page to extract Kwik URL:', url);
+            
+            const response = await RequestManager.cloudscraperGet(url, {
+                headers: {
+                    "Referer": "https://animepahe.si/",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                },
+                timeout: 30000,
+            });
+    
+            console.log("Page fetched for extraction, status:", response.statusCode);
+            
+            const body = response.body;
+            
+            const redirectPattern = /href\s*:\s*["']([^"']+)["']/i;
+            const redirectMatch = body.match(redirectPattern);
+            if (redirectMatch && redirectMatch[1] && redirectMatch[1].includes('kwik.cx')) {
+                console.log('Found redirect URL:', redirectMatch[1]);
+                return redirectMatch[1];
+            }
+            
+            const scriptPattern = /href["']\s*,\s*["']([^"']+\.(?:kwik\.cx|kwikcx))[^"']*["']/i;
+            const scriptMatch = body.match(scriptPattern);
+            if (scriptMatch && scriptMatch[1]) {
+                let kwikUrl = scriptMatch[1];
+                if (kwikUrl.startsWith('/')) {
+                    const urlObj = new URL(url);
+                    kwikUrl = urlObj.protocol + '//' + urlObj.host + kwikUrl;
+                } else if (!kwikUrl.startsWith('http')) {
+                    kwikUrl = 'https://kwik.cx' + kwikUrl;
+                }
+                console.log('Found Kwik URL from script:', kwikUrl);
+                return kwikUrl;
+            }
+            
+            // Pattern 3: Look for kwik.cx URLs in href attributes
+            const hrefPattern = /href\s*=\s*["']([^"']*\bkwik\.cx\b[^"']*)["']/gi;
+            const hrefMatches = [...body.matchAll(hrefPattern)];
+            if (hrefMatches.length > 0) {
+                // Return the first kwik URL found
+                let kwikUrl = hrefMatches[0][1];
+                if (kwikUrl.startsWith('/')) {
+                    const urlObj = new URL(url);
+                    kwikUrl = urlObj.protocol + '//' + urlObj.host + kwikUrl;
+                }
+                console.log('Found Kwik URL from href:', kwikUrl);
+                return kwikUrl;
+            }
+            
+            // Pattern 4: Look for kwik.cx URLs in JavaScript redirects
+            const jsRedirectPattern = /["'](https?:\/\/[^"'\s]*kwik\.cx[^"'\s]*)["']/i;
+            const jsMatch = body.match(jsRedirectPattern);
+            if (jsMatch && jsMatch[1]) {
+                console.log('Found Kwik URL from JavaScript:', jsMatch[1]);
+                return jsMatch[1];
+            }
+            
+            // Pattern 5: Look for the specific script pattern you mentioned
+            const specificPattern = /href"\s*,\s*"([^"]*kwik\.cx[^"]*)"/;
+            const specificMatch = body.match(specificPattern);
+            if (specificMatch && specificMatch[1]) {
+                console.log('Found Kwik URL from specific pattern:', specificMatch[1]);
+                return specificMatch[1];
+            }
+            
+            console.log('No Kwik URL found in the HTML content');
+            return null;
+            
+        } catch (error) {
+            console.error('Error extracting Kwik URL:', error.message);
+            return null;
+        }
+    }
+
+    async getKwikDownloadUrl(url) {
+        console.log("[Step 2] Fetching page for download link:", url);
+    
+        const getResponse = await RequestManager.cloudscraperGet(url, {
+            headers: {
+                "Referer": "https://animepahe.si/",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            },
+            timeout: 30000,
+        });
+    
+        console.log("Page fetched, status:", getResponse.statusCode);
+        
+        // Extract cookies
+        const setCookieHeaders = getResponse.headers['set-cookie'] || [];
+        const cookies = setCookieHeaders.map(cookie => cookie.split(';')[0]).join('; ');
+        console.log("[Cookies]:", cookies);
+    
+        const body = getResponse.body;
+        const scripts = [...body.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map(m => m[1]);
+    
+        let foundAction = null;
+        let foundToken = null;
+    
+        // JavaScript execution environment
+        const dom = new JSDOM(
+            "<!doctype html><body><div class='adSense'></div><div class='adSense'></div></body>"
+        );
+        const { window } = dom;
+        const { document } = window;
+    
+        const $ = (sel) => {
+            if (typeof sel === "function") {
+                try { sel.call(window); } catch (e) {}
+                return $;
+            }
+            if (typeof sel !== "string")
+                return {
+                    html: () => "",
+                    attr: () => "",
+                    click: () => $,
+                    on: () => $,
+                    remove: () => $,
+                    length: 0,
+                };
+    
+            let els = [];
+            const eqMatch = sel.match(/^(.+):eq\((\d+)\)$/);
+            if (eqMatch) {
+                const all = document.querySelectorAll(eqMatch[1]);
+                els = all[parseInt(eqMatch[2])] ? [all[parseInt(eqMatch[2])]] : [];
+            } else {
+                try { els = Array.from(document.querySelectorAll(sel)); } catch (e) {}
+            }
+    
+            const el = els[0];
+            return {
+                html: (v) => {
+                    if (v !== undefined) {
+                        const htmlStr = String(v);
+                        const actionMatch = htmlStr.match(/action=["']([^"']+)["']/i);
+                        if (actionMatch) foundAction = actionMatch[1];
+                        const tokenMatch = htmlStr.match(/name=["']_token["'][^>]*value=["']([^"']+)["']/i);
+                        if (tokenMatch) foundToken = tokenMatch[1];
+                        if (el) el.innerHTML = htmlStr;
+                        return this;
+                    }
+                    return el?.innerHTML || "";
+                },
+                attr: (n, v) => v !== undefined ? (el?.setAttribute(n, v), this) : el?.getAttribute(n) || "",
+                click: (fn) => { if (typeof fn === "function") try { fn.call(el); } catch (e) {} return this; },
+                on: () => this,
+                remove: () => { el?.remove(); return this; },
+                length: els.length,
+            };
+        };
+        $.ajax = () => {};
+    
+        const sandbox = {
+            window, document, console,
+            navigator: { userAgent: "Mozilla/5.0" },
+            MutationObserver: class { observe() {} },
+            XMLHttpRequest: function () { this.open = this.send = this.setRequestHeader = () => {}; },
+            fetch: async () => ({ ok: true, text: async () => "", json: async () => ({}) }),
+            atob: (s) => Buffer.from(s, "base64").toString("binary"),
+            btoa: (s) => Buffer.from(s, "binary").toString("base64"),
+            $, setTimeout, clearTimeout,
+        };
+    
+        for (const s of scripts) {
+            if (s && s.length > 100) {
+                try {
+                    vm.runInContext(s, vm.createContext(sandbox), { timeout: 4000 });
+                    if (foundAction && foundToken) break;
+                } catch (e) {}
+            }
+        }
+    
+        if (!foundAction || !foundToken) {
+            throw new Error("⌠ Could not extract form action or token");
+        }
+    
+        console.log("[Step 3] Extracted action:", foundAction);
+        console.log("[Step 3] Extracted token:", foundToken);
+    
+        // Wait a bit to simulate human behavior
+        console.log("[Step 4] Waiting 2 seconds...");
+        await sleep(2000);
+    
+        // Step 3: Submit POST request
+        console.log("[Step 5] Submitting POST request...");
+        
+        const isServerless = process.env.VERCEL || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME;
+        
+        try {
+            // Use unified RequestManager for POST - works on both serverless and local!
+            const postResponse = await RequestManager.cloudscraperPost(
+                foundAction,
+                { _token: foundToken },
+                {
+                    json: false, // Use form encoding
+                    headers: {
+                        "Origin": "https://kwik.cx",
+                        "Referer": url,
+                        "Cookie": cookies,
+                    },
+                    followRedirect: false,
+                    followAllRedirects: false,
+                    timeout: 30000,
+                }
+            );
+
+            console.log("[Step 6] Response status:", postResponse.statusCode);
+
+            // Handle redirect responses
+            if (postResponse.statusCode === 302 || postResponse.statusCode === 301) {
+                const downloadUrl = postResponse.location || postResponse.headers.location;
+                console.log("Final download URL:", downloadUrl);
+                return downloadUrl;
+            } 
+            
+            if (postResponse.statusCode === 200) {
+                const body = postResponse.body;
+                
+                const metaMatch = body.match(/<meta[^>]*http-equiv=["']refresh["'][^>]*content=["'][^"]*url=([^"']+)["']/i);
+                if (metaMatch) {
+                    console.log("Found meta refresh URL:", metaMatch[1]);
+                    return metaMatch[1];
+                }
+                
+                const jsMatch = body.match(/window\.location(?:\.href)?\s*=\s*["']([^"']+)["']/i);
+                if (jsMatch) {
+                    console.log("Found JavaScript redirect URL:", jsMatch[1]);
+                    return jsMatch[1];
+                }
+
+                console.log("[Response body snippet]:", body.substring(0, 800));
+            }
+        } catch (error) {
+            console.log("[Request Error]:", error.message);
+            
+            // Even errors might contain redirect info
+            if (error.statusCode === 302 || error.statusCode === 301) {
+                const downloadUrl = error.response?.headers?.location;
+                if (downloadUrl) {
+                    console.log("Final download URL (from error):", downloadUrl);
+                    return downloadUrl;
+                }
+            }
+            throw error;
+        }
+    
+        throw new Error("✗ Could not extract download URL");
     }
 
     async extractCloudflareSessionCookies(context) {
@@ -357,7 +626,7 @@ class Animepahe {
             
             throw new Error('Response blocked or invalid');
         } catch (error) {
-            console.warn('Axios fallback failed:', error.message);
+            console.warn('Cloudscraper method failed:', error.message);
             throw error;
         }
     }
@@ -385,6 +654,8 @@ class Animepahe {
                         return await this.scrapePlayPage(params.id, params.episodeId);
                     case 'iframe':
                         return await this.scrapeIframe(params.id, params.episodeId, params.url);
+                    case 'download':
+                        return await this.scrapeDownloadLinks(params.url);
                 }
             }
 

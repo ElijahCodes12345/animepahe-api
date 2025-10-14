@@ -5,6 +5,121 @@ const Config = require('./config');
 const { CustomError } = require('../middleware/errorHandler');
 
 class RequestManager {
+    /**
+     * Universal cloudscraper method - handles GET, POST, and any HTTP method
+     * @param {Object} options - Request options
+     * @param {string} options.method - HTTP method (GET, POST, etc.)
+     * @param {string} options.url - Target URL
+     * @param {Object} options.headers - Custom headers
+     * @param {Object} options.form - Form data (for POST)
+     * @param {Object} options.json - JSON body (for POST)
+     * @param {boolean} options.followRedirect - Follow redirects (default: true)
+     * @param {number} options.timeout - Request timeout in ms
+     * @param {string} options.referer - Referer header
+     * @returns {Promise<Object>} Response with { statusCode, headers, body }
+     */
+    static async cloudscraperRequest(options = {}) {
+        const {
+            method = 'GET',
+            url,
+            headers = {},
+            form = null,
+            json = null,
+            followRedirect = true,
+            followAllRedirects = false,
+            timeout = 30000,
+            referer = Config.getUrl('home'),
+            resolveWithFullResponse = true,
+            simple = false
+        } = options;
+
+        if (!url) {
+            throw new CustomError('URL is required for cloudscraper request', 400);
+        }
+
+        const defaultHeaders = {
+            'User-Agent': Config.userAgent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': referer,
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'DNT': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site',
+        };
+
+        const requestOptions = {
+            method,
+            uri: url,
+            headers: { ...defaultHeaders, ...headers },
+            followRedirect,
+            followAllRedirects,
+            simple,
+            resolveWithFullResponse,
+            timeout,
+        };
+
+        // Add body data if provided
+        if (form) {
+            requestOptions.form = form;
+            requestOptions.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+        } else if (json) {
+            requestOptions.json = json;
+            requestOptions.headers['Content-Type'] = 'application/json';
+        }
+
+        try {
+            console.log(`[Cloudscraper] ${method} ${url}`);
+            const response = await cloudscraper(requestOptions);
+            
+            return {
+                statusCode: response.statusCode,
+                headers: response.headers,
+                body: response.body
+            };
+        } catch (error) {
+            // Handle redirects as responses (not errors)
+            if (error.statusCode === 301 || error.statusCode === 302) {
+                return {
+                    statusCode: error.statusCode,
+                    headers: error.response?.headers || {},
+                    body: error.response?.body || '',
+                    location: error.response?.headers?.location
+                };
+            }
+            
+            console.error(`[Cloudscraper Error] ${method} ${url}:`, error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * Simplified GET request with cloudscraper
+     */
+    static async cloudscraperGet(url, options = {}) {
+        return this.cloudscraperRequest({
+            method: 'GET',
+            url,
+            ...options
+        });
+    }
+
+    /**
+     * Simplified POST request with cloudscraper
+     */
+    static async cloudscraperPost(url, data = {}, options = {}) {
+        const isJson = options.json !== false;
+        
+        return this.cloudscraperRequest({
+            method: 'POST',
+            url,
+            ...(isJson ? { json: data } : { form: data }),
+            ...options
+        });
+    }
+
     static async fetch(url, cookieHeader, type = 'default') {
         if (type === 'default') {
             return this.fetchApiData(url, {}, cookieHeader);
@@ -16,28 +131,30 @@ class RequestManager {
         }
     }
 
-    static async scrapeWithCloudScraper(url) {
+    /**
+     * Legacy method - now uses the universal cloudscraper method
+     */
+    static async scrapeWithCloudScraper(url, options = {}) {
         console.log(`Fetching HTML from ${url}...`);
-    
-        const html = await cloudscraper.get(url, {
-        headers: {
-            Referer: Config.baseUrl,
-            'User-Agent': Config.userAgent,
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Sec-Fetch-*': '?', 
-            "dnt": "1",
-            "sec-ch-ua": '"Not A(Brand";v="99", "Microsoft Edge";v="121", "Chromium";v="121"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin",
-            "x-requested-with": "XMLHttpRequest"
-        }, timeout: 20000,
+        
+        const response = await this.cloudscraperGet(url, {
+            headers: {
+                Referer: Config.baseUrl,
+                'Accept-Encoding': 'gzip, deflate, br',
+                'dnt': '1',
+                'sec-ch-ua': '"Not A(Brand";v="99", "Microsoft Edge";v="121", "Chromium";v="121"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+                'x-requested-with': 'XMLHttpRequest',
+                ...options.headers
+            },
+            timeout: options.timeout || 20000
         });
 
-        return html;    
+        return response.body;
     }
 
     static async scrapeWithPlaywright(url) {
@@ -48,69 +165,69 @@ class RequestManager {
         const browser = await launchBrowser();
 
         try {
-        const contextOptions = {};
+            const contextOptions = {};
 
-        if (proxy) {
-            contextOptions.proxy = { server: proxy };
-        }
-
-        const context = await browser.newContext(contextOptions);
-        const page = await context.newPage();
-
-        // Stealth measures
-        await page.addInitScript(() => {
-            delete navigator.__proto__.webdriver;
-            Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3],
-            });
-            Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en'],
-            });
-
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) =>
-            parameters.name === 'notifications'
-                ? Promise.resolve({ state: Notification.permission })
-                : originalQuery(parameters);
-        });
-
-        // Realistic headers
-        await page.setExtraHTTPHeaders({
-            'User-Agent': Config.userAgent,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.google.com/',
-            'Cache-Control': 'no-cache',
-        });
-
-        console.log('Navigating to URL...');
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
-
-        await page.waitForTimeout(10000); // DDoS challenge buffer
-
-        const isApiRequest = url.includes('/api') || url.endsWith('.json');
-
-        if (!isApiRequest) {
-            try {
-            await page.waitForSelector('.episode-wrap, .episode-list', { timeout: 60000 });
-            } catch (e) {
-            console.log('Selector not found, continuing...');
+            if (proxy) {
+                contextOptions.proxy = { server: proxy };
             }
-        } else {
-            try {
-            await page.waitForFunction(() => {
-                const text = document.body.textContent;
-                return text.includes('{') && text.includes('}');
-            }, { timeout: 60000 });
-            } catch (e) {
-            console.log('API content not found, continuing...');
-            }
-        }
 
-        const content = await page.content();
-        return content;
+            const context = await browser.newContext(contextOptions);
+            const page = await context.newPage();
+
+            // Stealth measures
+            await page.addInitScript(() => {
+                delete navigator.__proto__.webdriver;
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3],
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en'],
+                });
+
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) =>
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({ state: Notification.permission })
+                        : originalQuery(parameters);
+            });
+
+            // Realistic headers
+            await page.setExtraHTTPHeaders({
+                'User-Agent': Config.userAgent,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.google.com/',
+                'Cache-Control': 'no-cache',
+            });
+
+            console.log('Navigating to URL...');
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
+
+            await page.waitForTimeout(10000); // DDoS challenge buffer
+
+            const isApiRequest = url.includes('/api') || url.endsWith('.json');
+
+            if (!isApiRequest) {
+                try {
+                    await page.waitForSelector('.episode-wrap, .episode-list', { timeout: 60000 });
+                } catch (e) {
+                    console.log('Selector not found, continuing...');
+                }
+            } else {
+                try {
+                    await page.waitForFunction(() => {
+                        const text = document.body.textContent;
+                        return text.includes('{') && text.includes('}');
+                    }, { timeout: 60000 });
+                } catch (e) {
+                    console.log('API content not found, continuing...');
+                }
+            }
+
+            const content = await page.content();
+            return content;
         } finally {
-        await browser.close();
+            await browser.close();
         }
     }
 
@@ -321,14 +438,11 @@ class RequestManager {
                 } : false
             });
 
-            // console.log("response Data", response.data);
-
             const responseText = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
             if (responseText.includes('DDoS-GUARD') || 
                 responseText.includes('checking your browser') ||
                 response.status === 403) {
                 console.log("response: ", responseText);
-                // This will trigger a cookie refresh in Animepahe.fetchApiData
                 throw new CustomError('DDoS-Guard authentication required, valid cookies required', 403);
             }
 
@@ -336,7 +450,6 @@ class RequestManager {
         } catch (error) {
             if (error.response?.status === 403) {
                 console.log(Config.cookies);
-                // Let Animepahe handle the cookie refresh
                 throw new CustomError('DDoS-Guard authentication required, invalid cookies', 403);
             }
             if (error.response?.status === 404) {

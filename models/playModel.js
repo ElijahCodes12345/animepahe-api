@@ -8,14 +8,14 @@ const { getJsVariable } = require('../utils/jsParser');
 const { CustomError } = require('../middleware/errorHandler');
 
 class PlayModel {
-    static async getStreamingLinks(id, episodeId) {
+    static async getStreamingLinks(id, episodeId, includeDownloads = true) {
         const results = await Animepahe.getData('play', { id, episodeId }, false);
         if (!results) throw new CustomError('Failed to fetch streaming data', 503);
 
         if (typeof results === 'object' && !results.data) results.data = [];
         if (results.data) return DataProcessor.processApiData(results);
 
-        return this.scrapePlayPage(id, episodeId, results);
+        return this.scrapePlayPage(id, episodeId, results, includeDownloads);
     }
 
     static async scrapeIframe(id, episodeId, url) {
@@ -172,26 +172,28 @@ class PlayModel {
     }
 
     static async getDownloadLinkList($) {
-        const downloadLinks = [];
-        $('#pickDownload a').each((index, element) => {
-            const link = $(element).attr('href');
-            if (!link) return;
-
-            const fullText = $(element).text().trim();
-
+        const elements = $('#pickDownload a').get();
+        const BATCH_SIZE = 4; // Increased from 2 to 4 for better parallelization
+        const BATCH_DELAY = 800; // Reduced from 1500ms to 800ms
+        
+        const processElement = async (element) => {
+            const $element = $(element);
+            const link = $element.attr('href');
+            if (!link) return null;
+            
+            const fullText = $element.text().trim();
             const normalized = fullText
-                .replace(/\u00A0/g, ' ')
-                .replace(/Â·/g, '·')
-                .replace(/\s+/g, ' ')
+                .replace(/\u00A0/g, ' ')  // Replace non-breaking spaces
+                .replace(/\s+/g, ' ')      // Normalize whitespace
                 .trim();
-
+            
             const parts = normalized.split('·').map(p => p.trim()).filter(Boolean);
-
+            
             let fansub = null;
             let filesize = null;
             let isDub = false;
-            const quality = fullText; // preserve original label for backwards compatibility
-
+            const quality = fullText;
+            
             const parseSizeAndEng = (text) => {
                 const m = text.match(/(\d+p)(?:\s*\((\d+(?:\.\d+)?(?:MB|GB))\))?(?:\s*(eng))?$/i);
                 if (m) {
@@ -199,21 +201,55 @@ class PlayModel {
                     isDub = !!m[3];
                 }
             };
-
+            
             if (parts.length === 1) {
                 parseSizeAndEng(parts[0]);
             } else if (parts.length >= 2) {
-                fansub = parts[0] || null;
-                const remainder = parts.slice(1).join(' · ');
-                parseSizeAndEng(remainder);
+                fansub = parts[0];
+                parseSizeAndEng(parts.slice(1).join(' · '));
             }
-
-            downloadLinks.push({ url: link || null, fansub, quality, filesize, isDub });
-        });
-
-        return downloadLinks;
+            
+            try {
+                const directDownloadLink = await this.getDownloadLinks(link);
+                return {
+                    fansub,
+                    quality,
+                    filesize,
+                    isDub,
+                    pahe: link, 
+                    download: directDownloadLink.downloadUrl
+                };
+            } catch (error) {
+                console.error(`Failed to get direct download for ${link}: ${error.message}`);
+                return {
+                    fansub,
+                    quality,
+                    filesize,
+                    isDub,
+                    pahe: link,
+                    download: null  // null means scraping failed
+                };
+            }
+        };
+        
+        const results = [];
+        for (let i = 0; i < elements.length; i += BATCH_SIZE) {
+            const batch = elements.slice(i, i + BATCH_SIZE);
+            const batchResults = await Promise.allSettled(batch.map(processElement));
+            
+            results.push(...batchResults
+                .filter(r => r.status === 'fulfilled' && r.value)
+                .map(r => r.value)
+            );
+            
+            // Shorter delay between batches
+            if (i + BATCH_SIZE < elements.length) {
+                await new Promise(resolve => setTimeout(resolve, BATCH_DELAY));
+            }
+        }
+        return results;
     }
-
+    
     static async getResolutionList($) {
         const resolutions = [];
         $('#resolutionMenu button').each((index, element) => {
@@ -233,7 +269,12 @@ class PlayModel {
         return resolutions;
     }
 
-    static async scrapePlayPage(id, episodeId, pageHtml) {
+    static async getDownloadLinks(url) {
+        const results = await Animepahe.getData('download', { url }, false);
+        return results;
+    }
+
+    static async scrapePlayPage(id, episodeId, pageHtml, includeDownloads = true) {
         const [session, provider] = ['session', 'provider'].map(v => getJsVariable(pageHtml, v) || null);
         if (!session || !provider) throw new CustomError('Episode not found', 404);
 
@@ -266,20 +307,38 @@ class PlayModel {
                 fanSub: res.fanSub,
             }));
 
-            let allSources = [];
-            try {
-                allSources = await this.processHybridOptimized(id, episodeId, resolutionData);
-            } catch (iframeError) {
-                console.error('Error in scrapeIframe, returning partial data:', iframeError);
-                allSources = [];
+            // Process sources and downloads in parallel if downloads are included
+            const tasks = [];
+            
+            // Always fetch sources
+            tasks.push(
+                this.processHybridOptimized(id, episodeId, resolutionData)
+                    .catch(error => {
+                        console.error('Error in scrapeIframe, returning empty sources:', error);
+                        return [];
+                    })
+            );
+            
+            // Conditionally fetch downloads
+            if (includeDownloads) {
+                tasks.push(
+                    this.getDownloadLinkList($)
+                        .catch(error => {
+                            console.error('Error fetching downloads, returning empty array:', error);
+                            return [];
+                        })
+                );
             }
-
+            
+            // Execute tasks in parallel
+            const [allSources, downloadLinks] = await Promise.all(tasks);
+            
             playInfo.sources = allSources.flat();
-            playInfo.downloadLinks = await this.getDownloadLinkList($);
+            playInfo.downloads = includeDownloads ? downloadLinks : [];
         } catch (error) {
             console.error('Error in scrapePlayPage:', error);
             playInfo.sources = playInfo.sources || [];
-            playInfo.downloadLinks = playInfo.downloadLinks || [];
+            playInfo.downloads = playInfo.downloads || [];
         }
 
         return playInfo;
@@ -287,7 +346,7 @@ class PlayModel {
 
     /*
      * Optimized parallel approach:
-     * Process multiple iframe sources in parallel batches. You can increase it to be higher than 2 below for better speed... but not recommended to avoid straining the server
+     * Process multiple iframe sources in parallel batches. Increased to 3 for better speed.
      */
     static async processHybridOptimized(id, episodeId, items) {
         const results = [];
@@ -308,8 +367,8 @@ class PlayModel {
             return results;
         }
 
-        // Process all items (including first) in parallel batches of 2 for better speed
-        const maxParallel = 2;
+        // Increased from 2 to 3 for better parallelization
+        const maxParallel = 3;
         for (let i = 0; i < uniqueItems.length; i += maxParallel) {
             const batch = uniqueItems.slice(i, i + maxParallel);
             
@@ -334,9 +393,9 @@ class PlayModel {
             const batchResults = await Promise.all(batchPromises);
             results.push(...batchResults);
             
-            // Small delay between batches to be respectful to servers
+            // Reduced delay from 500ms to 300ms
             if (i + maxParallel < uniqueItems.length) {
-                await new Promise(resolve => setTimeout(resolve, 500));
+                await new Promise(resolve => setTimeout(resolve, 300));
             }
         }
 
