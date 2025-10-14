@@ -1,6 +1,6 @@
 # AnimepaheAPI
 
-An unofficial REST API for [Animepahe](https://animepahe.ru/) that provides access to anime information, episodes, and streaming links.
+An unofficial REST API for [Animepahe](https://animepahe.si/) that provides access to anime information, episodes, and streaming links with direct download support.
 
 ## Features
 
@@ -8,9 +8,10 @@ An unofficial REST API for [Animepahe](https://animepahe.ru/) that provides acce
 - 🔍 Search for specific anime
 - 📋 Browse complete anime list
 - 📺 Get anime details and episodes
-- 🎬 Get streaming links
+- 🎬 Get streaming links with multiple resolutions
+- 📥 Direct download links with quality options
+- ⚡ Optimized parallel processing for faster responses
 - 📱 Check encoding queue status
-- ⚡ Fast and reliable
 - 🐋 Redis support for improved performance
 - 🛡️ Built-in DDoS protection bypass
 - 🔄 Automatic cookie management
@@ -57,7 +58,7 @@ The API supports Redis caching to improve performance and reduce load on the Ani
 
 You may edit these values as you see fit.
 
-If `REDIS_URL` is not provided, the API will still work
+If `REDIS_URL` is not provided, the API will still work without caching.
 
 ## API Endpoints
 
@@ -89,20 +90,17 @@ GET /api/:session            # Get anime details using anime session ID
 GET /api/:session/releases?sort=episode_desc&page=1  # Get episode list
 ```
 
-### Streaming
+### Streaming & Downloads
 ```
-GET /api/play/:session?episodeId=example  # Get streaming links
+GET /api/play/:session?episodeId=example                # With downloads (default)
+GET /api/play/:session?episodeId=example&downloads=false  # Without downloads (faster)
+GET /api/play/download-links?url=https://pahe.win/XYZ # To only get one download link
 ```
 
-> **Note:** In the API:
-> - `:session` in the URL path is the anime's unique identifier (e.g., '758e3b17-8f49-47d2-ac3f-5f70a5656241')
-> - `episodeId` as a query parameter is the episode's unique identifier, which matches the session value shown in individual episode entries from the /releases endpoint..
-> 
-> Example:
-> ```
-> /api/515dd441-386a-2ba3-6f79-e6e1e9c09802        # Get anime info
-> /api/play/515dd441-386a-2ba3-6f79-e6e1e9c09802?episodeId=a6399696d987035b4063a625d57266525fad3c3ee576a6606dba33ee8ac08367  # Get episode stream
-> ```
+> **Note:** 
+> - `:session` is the anime's unique identifier
+> - `episodeId` is the episode's unique identifier from the /releases endpoint
+> - Use `downloads=false` for faster responses if you only need streaming links
 
 ### Queue Status
 ```
