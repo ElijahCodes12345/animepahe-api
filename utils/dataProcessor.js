@@ -49,22 +49,22 @@ class DataProcessor {
             ...(current_page != null && { currentPage: current_page }),
             ...(last_page != null && { lastPage: last_page }),
             ...(next_page_url != null && { 
-                    nextPageUrl:next_page_url.replace(
+                nextPageUrl: next_page_url.replace(
                     new RegExp(`^(${Config.baseUrl}|/)`),
                     Config.hostUrl
-                ).replace('api?', urlPrefix)
+                ).replace('api?', `api/${urlPrefix}`)
             }),
-            ...(prev_page_url != null && { prevPageUrl: prev_page_url.replace(
+            ...(prev_page_url != null && { 
+                prevPageUrl: prev_page_url.replace(
                     new RegExp(`^(${Config.baseUrl}|/)`),
                     Config.hostUrl
-                ).replace('api?', urlPrefix)  
+                ).replace('api?', `api/${urlPrefix}`)  
             }),
             ...(from != null && { from }),
             ...(to != null && { to })
         };
-    }   
+    }
 
-    
     static _processAiringData(items) {
         return items.map(item => ({
             id: item.id || null,
