@@ -2,6 +2,9 @@
 
 An unofficial REST API for [Animepahe](https://animepahe.si/) that provides access to anime information, episodes, and streaming links with direct download support.
 
+> **⚠️ IMPORTANT NOTICE: API Temporarily Paused**  
+> The API has been temporarily paused due to suspiciously too many requests. My hosted version of this API is only for testing purposes. **You MUST host your own instance** to use the API.
+
 ## Features
 
 - 🎯 Get currently airing anime
