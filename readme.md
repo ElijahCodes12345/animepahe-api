@@ -49,6 +49,9 @@ USE_PROXY=false
 PROXIES=     # Optional - comma-separated proxy URLs
 REDIS_URL=   # Optional - Redis connection URL for caching (e.g., redis://user:pass@host:port)
 ALLOWED_ORIGINS= # Optional - CORS configuration (see below)
+RATE_LIMIT_SECRET= # Only set this if you want rate limiting (see Rate Limiting section below)
+RATE_LIMIT_MAX=100 # Max requests per window (when rate limiting is active)
+RATE_LIMIT_WINDOW=900 # Time window in seconds (when rate limiting is active)
 ```
 
 ### CORS Configuration
@@ -78,6 +81,23 @@ The API supports Redis caching to improve performance and reduce load on the Ani
 You may edit these values as you see fit.
 
 If `REDIS_URL` is not provided, the API will still work without caching.
+
+## Rate Limiting
+
+This API includes optional rate limiting that only activates when the `RATE_LIMIT_SECRET` environment variable is set. This allows you to add rate limiting to your own deployment (like your Vercel instance) without affecting other people who might host their own instances.
+
+To enable rate limiting on your deployment:
+1. Set a unique `RATE_LIMIT_SECRET` value (e.g., a random UUID)
+2. Configure `RATE_LIMIT_MAX` (default: 100 requests per window)
+3. Configure `RATE_LIMIT_WINDOW` in seconds (default: 900 seconds = 15 minutes)
+4. Configure `REDIS_URL` for persistent rate limiting across server instances (recommended for production use)
+
+**Note**: Rate limiting requires Redis to function properly. If `REDIS_URL` is not configured, rate limiting will be automatically disabled even if `RATE_LIMIT_SECRET` is set. This ensures that other deployments without Redis continue to work normally.
+
+When rate limiting is active, the API will return HTTP 429 status codes when limits are exceeded, along with rate limit headers:
+- `X-RateLimit-Limit`: Maximum requests per window
+- `X-RateLimit-Remaining`: Requests remaining in current window
+- `X-RateLimit-Reset`: Time when the current window resets
 
 ## API Endpoints
 

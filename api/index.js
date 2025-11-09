@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const Config = require('../utils/config');
 const { errorHandler, CustomError } = require('../middleware/errorHandler');
+const rateLimiter = require('../middleware/rateLimiter');
 const homeRoutes = require('../routes/homeRoutes');
 const queueRoutes = require('../routes/queueRoutes');
 const animeListRoutes = require('../routes/animeListRoutes');
@@ -55,6 +56,9 @@ app.use((req, res, next) => {
     Config.setHostUrl(protocol, host);
     next();
 });
+
+// Apply rate limiting only if RATE_LIMIT_SECRET is set (only affects your deployment)
+app.use(rateLimiter);
 
 app.use('/api', testRoutes);
 app.use('/api', homeRoutes); // caching done in homeRoutes
