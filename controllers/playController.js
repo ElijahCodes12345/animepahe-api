@@ -15,7 +15,7 @@ class PlayController {
             // user can pass ?downloads=false or ?downloads=0 to skip downloads
             const includeDownloads = downloads === undefined || downloads === 'true' || downloads === '1';
 
-            console.log(`${includeDownloads ? ' with downloads' : ' (skipping downloads)'}`);
+            // console.log(`[PlayController] Request query downloads: '${downloads}' -> includeDownloads: ${includeDownloads}`);
 
             const links = await PlayModel.getStreamingLinks(id, episodeId, includeDownloads);
             

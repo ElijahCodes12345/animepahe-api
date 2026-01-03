@@ -2,8 +2,8 @@
 
 An unofficial REST API for [Animepahe](https://animepahe.si/) that provides access to anime information, episodes, and streaming links with direct download support.
 
-> **⚠️ IMPORTANT NOTICE: API Temporarily Paused**  
-> The API has been temporarily paused due to suspiciously too many requests. My hosted version of this API is only for testing purposes. **You MUST host your own instance** to use the API.
+> **⚠️ IMPORTANT NOTICE: API MAYBE Temporarily Paused**  
+> The API maybe temporarily paused due to suspiciously too many requests. My hosted version of this API is only for testing purposes. **You MUST host your own instance** to use the API.
 
 ## Features
 
@@ -46,6 +46,7 @@ BASE_URL=https://animepahe.ru # Optional
 USER_AGENT=  # Optional
 COOKIES=     # Optional - for manual cookie management
 USE_PROXY=false
+IFRAME_BASE_URL=kwik.cx # Optional - Base URL for the video iframe (default: kwik.cx)
 PROXIES=     # Optional - comma-separated proxy URLs
 REDIS_URL=   # Optional - Redis connection URL for caching (e.g., redis://user:pass@host:port)
 ALLOWED_ORIGINS= # Optional - CORS configuration (see below)

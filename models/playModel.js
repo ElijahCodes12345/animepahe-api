@@ -6,6 +6,7 @@ const DataProcessor = require('../utils/dataProcessor');
 const Animepahe = require('../scrapers/animepahe');
 const { getJsVariable } = require('../utils/jsParser');
 const { CustomError } = require('../middleware/errorHandler');
+const UrlConverter = require('../utils/urlConverter');
 
 class PlayModel {
     static async getStreamingLinks(id, episodeId, includeDownloads = true) {
@@ -41,8 +42,13 @@ class PlayModel {
         };
 
         for (const script of scriptMatches) {
+            // Optimization: fast regex check before heavy VM execution
+            const fromScript = findM3u8(script);
+            if (fromScript) {
+                return [{ url: fromScript, isM3U8: fromScript.includes('.m3u8') || false }];
+            }
+
             if (!script.includes('eval(')) continue;
-            console.log('Evaluating candidate script via vm sandbox...');
 
             const dom = new JSDOM(`<!DOCTYPE html><video id="player"></video>`);
             const document = dom.window.document;
@@ -68,7 +74,6 @@ class PlayModel {
                 },
                 attachMedia: (m) => {
                     try {
-                    // if video element has src set later, capture it
                     if (m && m.src && typeof m.src === 'string' && m.src.includes('.m3u8')) captured.add(m.src);
                     } catch (e) {}
                 },
@@ -77,8 +82,6 @@ class PlayModel {
             };
             Hls.isSupported = () => true;
 
-            // also intercept assignments to video.src by monitoring JSDOM element after script
-            // Sandbox
             const sandbox = {
                 console,
                 window: dom.window,
@@ -93,20 +96,16 @@ class PlayModel {
 
             vm.createContext(sandbox);
 
-            // Run script and also try to unwrap one level of nested evals if found
             try {
-                // Run once
                 vm.runInContext(script, sandbox, { timeout: 2000 });
             } catch (err) {
-                console.log('Eval failed:', err && err.message);
+                // ignore eval errors
             }
 
-            // Some pages embed further eval inside strings. Try to detect `eval(function(...` pattern and run inner body(s)
-            // search the script text for eval( and then try to extract common packed patterns. This is best-effort.
             const innerEvalBodies = [];
             const packedMatch = script.match(/eval\((function[\s\S]*?)\)\s*;?/i);
             if (packedMatch && packedMatch[1]) innerEvalBodies.push(packedMatch[1]);
-            // also check for common eval\(\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('[\s\S]*?'\)\)
+            
             const genericMatches = [...script.matchAll(/eval\(([\s\S]*?)\)\s*;?/gi)];
             for (const gm of genericMatches) {
                 if (gm[1] && !innerEvalBodies.includes(gm[1])) innerEvalBodies.push(gm[1]);
@@ -114,50 +113,30 @@ class PlayModel {
 
             for (const body of innerEvalBodies) {
                 try {
-                // attempt to run inner body directly
                 vm.runInContext(body, sandbox, { timeout: 1500 });
-                } catch (err) {
-                // ignore errors: many packed scripts expect DOM APIs we stubbed
-                }
+                } catch (err) {}
             }
 
-            // After execution, check multiple places for m3u8
-            // 1) captured set from Plyr/Hls
             if (captured.size) {
                 const arr = Array.from(captured);
-                // return first
-                console.log('Resolved m3u8 (captured):', arr[0]);
                 return [{ url: arr[0] || null, isM3U8: arr[0].includes('.m3u8') || false }];
             }
 
-            // 2) check video element src
             try {
                 const vsrc = videoEl && videoEl.src;
                 const found = findM3u8(vsrc);
                 if (found) {
-                console.log('Resolved m3u8 (video.src):', found);
                 return [{ url: found, isM3U8: found.includes('.m3u8') || false }];
                 }
-            } catch (e) { /* ignore */ }
+            } catch (e) {}
 
-            // 3) check sandbox.window / sandbox.document for q or other variables
             try {
                 const pkg = JSON.stringify(sandbox);
                 const found = findM3u8(pkg);
                 if (found) {
-                console.log('Resolved m3u8 (sandbox JSON):', found);
                 return [{ url: found, isM3U8: found.includes('.m3u8') || false }];
                 }
-            } catch (e) { /* ignore */ }
-
-            // 4) finally scan the original script text for direct m3u8 (rare if obfuscated)
-            const fromScript = findM3u8(script);
-            if (fromScript) {
-                console.log('Resolved m3u8 (script literal):', fromScript);
-                return [{ url: fromScript, isM3U8: fromScript.includes('.m3u8') || false }];
-            }
-
-            console.log('Could not resolve m3u8 from this script, continuing to next candidate...');
+            } catch (e) {}
         }
 
         // fallback: try data-src attribute in html (in case)
@@ -171,10 +150,10 @@ class PlayModel {
         return null;
     }
 
-    static async getDownloadLinkList($) {
+    static async getDownloadLinkList($, resolveLinks = true) {
         const elements = $('#pickDownload a').get();
-        const BATCH_SIZE = 4; // Increased from 2 to 4 for better parallelization
-        const BATCH_DELAY = 800; // Reduced from 1500ms to 800ms
+        const BATCH_SIZE = 4;
+        const BATCH_DELAY = 800;
         
         const processElement = async (element) => {
             const $element = $(element);
@@ -183,8 +162,8 @@ class PlayModel {
             
             const fullText = $element.text().trim();
             const normalized = fullText
-                .replace(/\u00A0/g, ' ')  // Replace non-breaking spaces
-                .replace(/\s+/g, ' ')      // Normalize whitespace
+                .replace(/\u00A0/g, ' ')
+                .replace(/\s+/g, ' ')
                 .trim();
             
             const parts = normalized.split('·').map(p => p.trim()).filter(Boolean);
@@ -192,12 +171,14 @@ class PlayModel {
             let fansub = null;
             let filesize = null;
             let isDub = false;
+            let resolution = null;
             const quality = fullText;
             
             const parseSizeAndEng = (text) => {
-                const m = text.match(/(\d+p)(?:\s*\((\d+(?:\.\d+)?(?:MB|GB))\))?(?:\s*(eng))?$/i);
+                const m = text.match(/(\d+)p(?:\s*\((\d+(?:\.\d+)?(?:MB|GB))\))?(?:\s*(eng))?$/i);
                 if (m) {
-                    filesize = m[2] || null;
+                    resolution = m[1];
+                    filesize = m[2] || "Unknown";
                     isDub = !!m[3];
                 }
             };
@@ -208,30 +189,43 @@ class PlayModel {
                 fansub = parts[0];
                 parseSizeAndEng(parts.slice(1).join(' · '));
             }
+
+            // Correction for specific known fansubs or patterns if needed
+            // (Standard pahe format is quite consistent)
+
+            // Normalize isDub check - sometimes "Eng Dub" is in the title, not just the quality string
+            // But we rely on the list item text usually.
+            
+            const item = {
+                fansub,
+                quality,
+                resolution,
+                filesize,
+                isDub,
+                pahe: link,
+                download: null
+            };
+
+            if (!resolveLinks) {
+                return item;
+            }
             
             try {
                 const directDownloadLink = await this.getDownloadLinks(link);
-                return {
-                    fansub,
-                    quality,
-                    filesize,
-                    isDub,
-                    pahe: link, 
-                    download: directDownloadLink.downloadUrl
-                };
+                item.download = directDownloadLink.downloadUrl;
+                return item;
             } catch (error) {
                 console.error(`Failed to get direct download for ${link}: ${error.message}`);
-                return {
-                    fansub,
-                    quality,
-                    filesize,
-                    isDub,
-                    pahe: link,
-                    download: null  // null means scraping failed
-                };
+                return item;
             }
         };
         
+        // If not resolving links, we don't need batching or delays
+        if (!resolveLinks) {
+             const results = await Promise.all(elements.map(processElement));
+             return results.filter(r => r);
+        }
+
         const results = [];
         for (let i = 0; i < elements.length; i += BATCH_SIZE) {
             const batch = elements.slice(i, i + BATCH_SIZE);
@@ -242,7 +236,6 @@ class PlayModel {
                 .map(r => r.value)
             );
             
-            // Shorter delay between batches
             if (i + BATCH_SIZE < elements.length) {
                 await new Promise(resolve => setTimeout(resolve, BATCH_DELAY));
             }
@@ -296,6 +289,7 @@ class PlayModel {
             session,
             provider,
             episode: $('.episode-menu #episodeMenu').text().trim().replace(/\D/g, ''),
+            anime_title: $('div.title-wrapper > h1 > span').text().trim().replace(/^Watch\s+/i, '').replace(/\s+-\s+\d+\s+Online$/i, '') || $('h1').text().trim().replace(/^Watch\s+/i, '').replace(/\s+-\s+\d+\s+Online$/i, '').replace(/ Episode \d+$/, ''),
         };
 
         try {
@@ -307,34 +301,68 @@ class PlayModel {
                 fanSub: res.fanSub,
             }));
 
-            // Process sources and downloads in parallel if downloads are included
-            const tasks = [];
+            // Process sources and downloads
             
-            // Always fetch sources
-            tasks.push(
-                this.processHybridOptimized(id, episodeId, resolutionData)
-                    .catch(error => {
-                        console.error('Error in scrapeIframe, returning empty sources:', error);
-                        return [];
-                    })
-            );
+            // 1. Fetch sources (m3u8)
+            const allSources = await this.processHybridOptimized(id, episodeId, resolutionData);
             
-            // Conditionally fetch downloads
+            // 2. Prepare fast download links map
+            // We create a map of "resolution-fansub-isDub" key to the fast download URL
+            const fastDownloadMap = new Map();
+            
+            const processedSources = allSources.flat().map(source => {
+                if (includeDownloads && source.url && source.isM3U8) {
+                    const downloadUrl = UrlConverter.buildDownloadUrl(
+                        source.url,
+                        Config.iframeBaseUrl,
+                        {
+                            animeTitle: playInfo.anime_title,
+                            episode: playInfo.episode,
+                            resolution: source.resolution,
+                            fansub: source.fanSub,
+                            isDub: source.isDub
+                        }
+                    );
+                    
+                    if (downloadUrl) {
+                        source.download = downloadUrl;
+                        // Key format: "720-SubsPlease-false"
+                        const key = `${source.resolution}-${source.fanSub || 'default'}-${source.isDub}`;
+                        fastDownloadMap.set(key, downloadUrl);
+                    }
+                }
+                return source;
+            });
+            
+            playInfo.sources = processedSources;
+
+            // 3. Handle Downloads List
             if (includeDownloads) {
-                tasks.push(
-                    this.getDownloadLinkList($)
-                        .catch(error => {
-                            console.error('Error fetching downloads, returning empty array:', error);
-                            return [];
-                        })
-                );
+                // Fetch the metadata list (without resolving links) - FAST
+                const metadataList = await this.getDownloadLinkList($, false);
+                
+                // Hydrate the metadata list with our fast links
+                const finalDownloads = metadataList.map(item => {
+                    const key = `${item.resolution}-${item.fansub || 'default'}-${item.isDub}`;
+                    const fastLink = fastDownloadMap.get(key);
+                    
+                    if (fastLink) {
+                        item.download = fastLink;
+                    }
+                    return item;
+                });
+                
+                // Filter out items that still don't have a download link? 
+                // Alternatively, we could try to resolve the remaining ones sequentially if needed.
+                // For now, let's return what we have. Most should match.
+                
+                playInfo.downloads = finalDownloads;
+                
+                console.log(`Matched ${finalDownloads.filter(d => d.download).length}/${metadataList.length} download links locally.`);
+                
+            } else {
+                playInfo.downloads = [];
             }
-            
-            // Execute tasks in parallel
-            const [allSources, downloadLinks] = await Promise.all(tasks);
-            
-            playInfo.sources = allSources.flat();
-            playInfo.downloads = includeDownloads ? downloadLinks : [];
         } catch (error) {
             console.error('Error in scrapePlayPage:', error);
             playInfo.sources = playInfo.sources || [];
