@@ -3,10 +3,10 @@ const path = require('path');
 class UrlConverter {
     /**
      * Converts a stream m3u8 URL to a direct MP4 download URL
-     * Input: https://vault-14.owocdn.top/stream/14/04/{hash}/uwu.m3u8
-     * Output: https://vault-14.kwik.cx/mp4/14/04/{hash}
+     * Input: https://exampledomain.top/stream/14/04/{hash}/uwu.m3u8
+     * Output: https://anotherexampledomain.cx/mp4/14/04/{hash}
      * 
-     * @param {string} m3u8Url - The original stream URL
+     * @param {string} m3u8Url - The original stream URL   
      * @param {string} kwikDomain - The kwik domain (e.g. 'kwik.cx')
      * @returns {string|null} - The converted download URL or null if invalid
      */
@@ -23,10 +23,8 @@ class UrlConverter {
                 urlObj.hostname = kwikDomain;
             }
             
-            // Replace /stream/ with /mp4/
             urlObj.pathname = urlObj.pathname.replace('/stream/', '/mp4/');
             
-            // Remove /uwu.m3u8 suffix
             if (urlObj.pathname.endsWith('/uwu.m3u8')) {
                 urlObj.pathname = urlObj.pathname.replace('/uwu.m3u8', '');
             } else if (urlObj.pathname.endsWith('.m3u8')) {
@@ -42,18 +40,20 @@ class UrlConverter {
 
     /**
      * Generates a descriptive filename for the download
-     * Format: AnimePahe_{Anime_Title}_{Episode}_{Resolution}_{Fansub}.mp4
+     * Format: AnimePahe_{Anime_Title}_{Eng_Dub?}_-_{Episode}_{BD?}_{Resolution}_{Fansub}.mp4
      */
-    static getFilename(animeTitle, episode, resolution, fansub, isDub) {
+    static getFilename(animeTitle, episode, resolution, fansub, isDub, isBD) {
         if (!animeTitle) return 'video.mp4';
         
         // Sanitize title
         const safeTitle = animeTitle.replace(/[^a-z0-9]/gi, '_').replace(/_+/g, '_');
         const dubStr = isDub ? '_Eng_Dub' : '';
+        const bdStr = isBD ? '_BD' : '';
         const resStr = resolution ? `_${resolution}p` : '';
         const fansubStr = fansub ? `_${fansub}` : '';
+        const epStr = episode || '0';
         
-        return `AnimePahe_${safeTitle}${dubStr}_-_${episode}${resStr}${fansubStr}.mp4`;
+        return `AnimePahe_${safeTitle}${dubStr}_-_${epStr}${bdStr}${resStr}${fansubStr}.mp4`;
     }
 
     /**
@@ -68,7 +68,8 @@ class UrlConverter {
             metadata.episode,
             metadata.resolution,
             metadata.fansub,
-            metadata.isDub
+            metadata.isDub,
+            metadata.isBD
         );
         
         return `${mp4Url}?file=${filename}`;

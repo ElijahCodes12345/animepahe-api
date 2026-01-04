@@ -173,6 +173,7 @@ class PlayModel {
             let isDub = false;
             let resolution = null;
             const quality = fullText;
+            let isBD = false;
             
             const parseSizeAndEng = (text) => {
                 // Extract resolution
@@ -184,10 +185,14 @@ class PlayModel {
                 if (sizeMatch) filesize = sizeMatch[1];
                 else filesize = "Unknown"; // if not found
 
-                // Extract dubbed status (eng in text)
-                // Looks for standalone 'eng'
+                // Extract dubbed status
                 if (/\beng\b/i.test(text)) {
                     isDub = true;
+                }
+
+                // Extract BD status
+                if (/\bBD\b/.test(text)) {
+                    isBD = true;
                 }
             };
             
@@ -204,6 +209,7 @@ class PlayModel {
                 resolution,
                 filesize,
                 isDub,
+                isBD,
                 pahe: link,
                 download: null
             };
@@ -296,20 +302,28 @@ class PlayModel {
 
         try {
             const resolutions = await this.getResolutionList($);
-            const resolutionData = resolutions.map(res => ({
-                url: res.url,
-                resolution: res.resolution,
-                isDub: res.isDub,
-                fanSub: res.fanSub,
-            }));
-
-            // Process sources and downloads
             
-            // 1. Fetch sources (m3u8)
+            const metadataList = await this.getDownloadLinkList($, false);
+
+            const resolutionData = resolutions.map(res => {
+                const match = metadataList.find(m => 
+                    m.resolution === res.resolution && 
+                    (m.fansub === res.fanSub || (!m.fansub && !res.fanSub)) &&
+                    m.isDub === res.isDub
+                );
+                
+                return {
+                    url: res.url,
+                    resolution: res.resolution,
+                    isDub: res.isDub,
+                    fanSub: res.fanSub,
+                    isBD: match ? match.isBD : false
+                };
+            });
+
             const allSources = await this.processHybridOptimized(id, episodeId, resolutionData);
             
-            // 2. Prepare fast download links map
-            // We create a map of "resolution-fansub-isDub" key to the fast download URL
+            // fast download links map
             const fastDownloadMap = new Map();
             
             const processedSources = allSources.flat().map(source => {
@@ -322,14 +336,15 @@ class PlayModel {
                             episode: playInfo.episode,
                             resolution: source.resolution,
                             fansub: source.fanSub,
-                            isDub: source.isDub
+                            isDub: source.isDub,
+                            isBD: source.isBD
                         }
                     );
                     
                     if (downloadUrl) {
                         source.download = downloadUrl;
-                        // Key format: "720-SubsPlease-false"
-                        const key = `${source.resolution}-${source.fanSub || 'default'}-${source.isDub}`;
+                        // Key format: "720-SubsPlease-false-true" (res-fansub-isDub-isBD)
+                        const key = `${source.resolution}-${source.fanSub || 'default'}-${source.isDub}-${source.isBD}`;
                         fastDownloadMap.set(key, downloadUrl);
                     }
                 }
@@ -337,33 +352,29 @@ class PlayModel {
             });
             
             playInfo.sources = processedSources;
-
-            // 3. Handle Downloads List
+            
             if (includeDownloads) {
-                // Fetch the metadata list (without resolving links) - FAST
-                const metadataList = await this.getDownloadLinkList($, false);
-                
                 // Hydrate the metadata list with our fast links
-                const finalDownloads = metadataList.map(item => {
-                    const key = `${item.resolution}-${item.fansub || 'default'}-${item.isDub}`;
-                    const fastLink = fastDownloadMap.get(key);
+                const hydratedDownloads = metadataList.map(item => {
+                    const key = `${item.resolution}-${item.fansub || 'default'}-${item.isDub}-${item.isBD}`;
+                    const fastDownload = fastDownloadMap.get(key);
                     
-                    if (fastLink) {
-                        item.download = fastLink;
+                    if (fastDownload) {
+                        item.download = fastDownload;
                     }
                     return item;
                 });
                 
-                // Filter out items that still don't have a download link? 
-                // Alternatively, we could try to resolve the remaining ones sequentially if needed.
-                // For now, let's return what we have. Most should match.
-                
-                playInfo.downloads = finalDownloads;
-                
-                console.log(`Matched ${finalDownloads.filter(d => d.download).length}/${metadataList.length} download links locally.`);
-                
+                playInfo.downloads = hydratedDownloads;
+                console.log(`Matched ${hydratedDownloads.filter(d => d.download).length}/${metadataList.length} download links locally.`);
             } else {
                 playInfo.downloads = [];
+            }
+
+            // Remove internal properties not needed in the response
+            playInfo.sources.forEach(s => delete s.isBD);
+            if (playInfo.downloads) {
+                playInfo.downloads.forEach(d => delete d.isBD);
             }
         } catch (error) {
             console.error('Error in scrapePlayPage:', error);
@@ -413,6 +424,7 @@ class PlayModel {
                         resolution: data.resolution,
                         isDub: data.isDub,
                         fanSub: data.fanSub,
+                        isBD: data.isBD || false,
                     }));
                 } catch (err) {
                     console.error(`Failed to process ${data.resolution}:`, err.message);
