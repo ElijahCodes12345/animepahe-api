@@ -5,6 +5,7 @@ class Config {
     constructor() {
         this.hostUrl = '';
         this.baseUrl = 'https://animepahe.si'; 
+        this.iframeBaseUrl = 'kwik.cx';
         this.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
         this.extraHTTPHeaders = {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
@@ -148,6 +149,10 @@ class Config {
                 console.error("Error processing proxies from environment variables:", error.message);
                 this.proxies = [];
             }
+        }
+
+        if (process.env.IFRAME_BASE_URL) {
+            this.iframeBaseUrl = process.env.IFRAME_BASE_URL;
         }
 
         this.proxyEnabled = process.env.USE_PROXY === 'true';

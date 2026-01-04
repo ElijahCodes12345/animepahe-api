@@ -3,6 +3,7 @@ const axios = require('axios');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 const { CustomError } = require('../middleware/errorHandler');
+const Config = require('../utils/config');
 
 // Helper to wait
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -79,13 +80,15 @@ async function extractKwikUrl(url) {
         // Pattern 1: Look for the specific script pattern with redirect href
         const redirectPattern = /href\s*:\s*["']([^"']+)["']/i;
         const redirectMatch = body.match(redirectPattern);
-        if (redirectMatch && redirectMatch[1] && redirectMatch[1].includes('kwik.cx')) {
+        if (redirectMatch && redirectMatch[1] && redirectMatch[1].includes(Config.iframeBaseUrl)) {
             console.log('Found redirect URL:', redirectMatch[1]);
             return redirectMatch[1];
         }
         
         // Pattern 2...
-        const scriptPattern = /href["']\s*,\s*["']([^"']+\.(?:kwik\.cx|kwikcx))[^"']*["']/i;
+        // Dynamic construction
+        const inputDomain = Config.iframeBaseUrl.replace('.', '\\.');
+        const scriptPattern = new RegExp(`href["']\\s*,\\s*["']([^"']+\\.(?:${inputDomain}|${inputDomain.replace('\\.', '')}))[^"']*["']`, 'i');
         const scriptMatch = body.match(scriptPattern);
         if (scriptMatch && scriptMatch[1]) {
             // If it's a relative URL, make it absolute
@@ -94,14 +97,14 @@ async function extractKwikUrl(url) {
                 const urlObj = new URL(url);
                 kwikUrl = urlObj.protocol + '//' + urlObj.host + kwikUrl;
             } else if (!kwikUrl.startsWith('http')) {
-                kwikUrl = 'https://kwik.cx' + kwikUrl;
+                kwikUrl = `https://${Config.iframeBaseUrl}${kwikUrl}`;
             }
             console.log('Found Kwik URL from script:', kwikUrl);
             return kwikUrl;
         }
         
         // Pattern 3: Look for kwik.cx URLs in href attributes
-        const hrefPattern = /href\s*=\s*["']([^"']*\bkwik\.cx\b[^"']*)["']/gi;
+        const hrefPattern = new RegExp(`href\\s*=\\s*["']([^"']*\\b${inputDomain}\\b[^"']*)["']`, 'gi');
         const hrefMatches = [...body.matchAll(hrefPattern)];
         if (hrefMatches.length > 0) {
             // Return the first kwik URL found
@@ -115,7 +118,7 @@ async function extractKwikUrl(url) {
         }
         
         // Pattern 4: Look for kwik.cx URLs in JavaScript redirects
-        const jsRedirectPattern = /["'](https?:\/\/[^"'\s]*kwik\.cx[^"'\s]*)["']/i;
+        const jsRedirectPattern = new RegExp(`["'](https?:\\/\\/[^"']*${inputDomain}[^"']*)["']`, 'i');
         const jsMatch = body.match(jsRedirectPattern);
         if (jsMatch && jsMatch[1]) {
             console.log('Found Kwik URL from JavaScript:', jsMatch[1]);
@@ -123,7 +126,7 @@ async function extractKwikUrl(url) {
         }
         
         // Pattern 5: Look for the specific script pattern you mentioned
-        const specificPattern = /href"\s*,\s*"([^"]*kwik\.cx[^"]*)"/;
+        const specificPattern = new RegExp(`href"\\s*,\\s*"([^"]*${inputDomain}[^"]*)"`);
         const specificMatch = body.match(specificPattern);
         if (specificMatch && specificMatch[1]) {
             console.log('Found Kwik URL from specific pattern:', specificMatch[1]);
@@ -275,7 +278,7 @@ async function getKwikDownloadUrl(url) {
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                     "Accept-Language": "en-US,en;q=0.5",
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "Origin": "https://kwik.cx",
+                    "Origin": `https://${Config.iframeBaseUrl}`,
                     "Referer": url,
                     "Cookie": cookies,
                 },
@@ -334,7 +337,7 @@ async function getKwikDownloadUrl(url) {
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                         "Accept-Language": "en-US,en;q=0.5",
                         "Content-Type": "application/x-www-form-urlencoded",
-                        "Origin": "https://kwik.cx",
+                        "Origin": `https://${Config.iframeBaseUrl}`,
                         "Referer": url,
                         "Cookie": cookies,
                         "Connection": "keep-alive",
