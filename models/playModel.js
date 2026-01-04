@@ -175,11 +175,19 @@ class PlayModel {
             const quality = fullText;
             
             const parseSizeAndEng = (text) => {
-                const m = text.match(/(\d+)p(?:\s*\((\d+(?:\.\d+)?(?:MB|GB))\))?(?:\s*(eng))?$/i);
-                if (m) {
-                    resolution = m[1];
-                    filesize = m[2] || "Unknown";
-                    isDub = !!m[3];
+                // Extract resolution
+                const resMatch = text.match(/(\d+)p/i);
+                if (resMatch) resolution = resMatch[1];
+
+                // Extract size
+                const sizeMatch = text.match(/\((\d+(?:\.\d+)?(?:MB|GB))\)/i);
+                if (sizeMatch) filesize = sizeMatch[1];
+                else filesize = "Unknown"; // if not found
+
+                // Extract dubbed status (eng in text)
+                // Looks for standalone 'eng'
+                if (/\beng\b/i.test(text)) {
+                    isDub = true;
                 }
             };
             
@@ -189,12 +197,6 @@ class PlayModel {
                 fansub = parts[0];
                 parseSizeAndEng(parts.slice(1).join(' · '));
             }
-
-            // Correction for specific known fansubs or patterns if needed
-            // (Standard pahe format is quite consistent)
-
-            // Normalize isDub check - sometimes "Eng Dub" is in the title, not just the quality string
-            // But we rely on the list item text usually.
             
             const item = {
                 fansub,
