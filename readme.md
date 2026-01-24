@@ -126,7 +126,7 @@ Note: For tab use 'hash' instead of '#'
 
 ### Anime Information
 ```
-GET /api/:session            # Get anime details using anime session ID
+GET /api/:session  # Get anime details using anime session ID
 GET /api/:session/releases?sort=episode_desc&page=1  # Get episode list
 ```
 
@@ -169,6 +169,12 @@ The API returns errors in this format:
 - cloudscraper
 - jsdom
 - vm
+
+## Acknowledgments
+
+Special thanks to:
+- [Pal-droid](https://github.com/Pal-droid) for assistance in improving the project's logic and features.
+- All the developers whose libraries made this project possible.
 
 ## License
 
