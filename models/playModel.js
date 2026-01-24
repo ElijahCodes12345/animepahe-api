@@ -314,6 +314,7 @@ class PlayModel {
                 
                 return {
                     url: res.url,
+                    embed: res.url,
                     resolution: res.resolution,
                     isDub: res.isDub,
                     fanSub: res.fanSub,
@@ -421,6 +422,7 @@ class PlayModel {
                     
                     return sources.map(source => ({
                         ...source,
+                        embed: data.embed,
                         resolution: data.resolution,
                         isDub: data.isDub,
                         fanSub: data.fanSub,
@@ -458,6 +460,7 @@ class PlayModel {
 
                 const sourcesWithMeta = sources.map(source => ({
                     ...source,
+                    embed: data.embed,
                     resolution: data.resolution,
                     isDub: data.isDub,
                     fanSub: data.fanSub,
