@@ -2,10 +2,11 @@
   - type: web
     name: animepahe-api
     runtime: node
+    repo: https://github.com/ElijahCodes12345/animepahe-api
     branch: develop
     buildCommand: npm install
     startCommand: npm start
+    plan: free
     envVars:
       - key: NODE_ENV
         value: production
-    healthCheckPath: /
