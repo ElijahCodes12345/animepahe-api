@@ -1,0 +1,11 @@
+﻿services:
+  - type: web
+    name: animepahe-api
+    runtime: node
+    branch: develop
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+    healthCheckPath: /
