@@ -2,7 +2,7 @@
   - type: web
     name: animepahe-api
     env: node                 # FIXED: use 'env' instead of 'runtime'
-    branch: develop
+    branch: main
     numInstances: 1
     buildCommand: npm install
     startCommand: npm start
