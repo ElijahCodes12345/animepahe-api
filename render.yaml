@@ -1,12 +1,11 @@
 ﻿services:
   - type: web
     name: animepahe-api
-    runtime: node
-    repo: https://github.com/ElijahCodes12345/animepahe-api
-    branch: develop
+    env: node                 # FIXED: use 'env' instead of 'runtime'
+    branch: main
+    numInstances: 1
     buildCommand: npm install
     startCommand: npm start
-    plan: free
     envVars:
       - key: NODE_ENV
         value: production

@@ -29,6 +29,37 @@ npx playwright install
 copy .env.example .env
 ```
 
+## Usage as a Library
+
+You can also use this project as a **Node.js library** directly in your code without running a server.
+
+**Installation:**
+```bash
+npm install github:ElijahCodes12345/animepahe-api
+```
+
+**Example Usage:**
+```javascript
+const animepahe = require('animepahe-api');
+
+// Search for anime
+const searchResults = await animepahe.search('title');
+console.log(searchResults);
+
+// Get anime info
+const info = await animepahe.getInfo('title');
+console.log(info);
+
+// Get episode releases
+const episodes = await animepahe.getReleases('title', 'episode_desc', 1);
+console.log(episodes);
+
+// Get streaming links (m3u8 URLs and download links)
+const streamingData = await animepahe.getStreamingLinks('anime-session-id', 'episode-session-id');
+console.log(streamingData.sources);   // HLS streams
+console.log(streamingData.downloads); // Direct download links
+```
+
 ## Deploy
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FElijahCodes12345%2Fanimepahe-api)
