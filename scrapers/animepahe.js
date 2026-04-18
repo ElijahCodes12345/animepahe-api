@@ -7,6 +7,7 @@ const RequestManager = require("../utils/requestManager");
 const { launchBrowser } = require('../utils/browser');
 const { CustomError } = require('../middleware/errorHandler');
 const os = require('os');
+const { config } = require('dotenv');
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -335,7 +336,7 @@ class Animepahe {
             
             const response = await RequestManager.cloudscraperGet(url, {
                 headers: {
-                    "Referer": "https://animepahe.si/",
+                    "Referer": Config.getUrl('home'),
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                 },
                 timeout: 30000,
@@ -414,7 +415,7 @@ class Animepahe {
     
         const getResponse = await RequestManager.cloudscraperGet(url, {
             headers: {
-                "Referer": "https://animepahe.si/",
+                "Referer": Config.getUrl('home'),
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             },
             timeout: 30000,
