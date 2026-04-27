@@ -17,7 +17,7 @@ const app = express();
 try {
     Config.validate();
     Config.loadFromEnv();
-    console.log('\x1b[36m%s\x1b[0m', 'Configuration set!.'); // Just wanted to try adding colors
+    console.log('\x1b[36m%s\x1b[0m', 'Configuration set!.');
 } catch (error) {
     console.error(error.message);
     process.exit(1); 
@@ -27,14 +27,81 @@ try {
 const corsOptions = {
     origin: function (origin, callback) {
         if (!origin) return callback(null, true);
-        
+
         const allowedOrigins = process.env.ALLOWED_ORIGINS 
             ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-            : ['*']; // Default: allow all origins
-        
+            : ['*'];
+
         if (allowedOrigins.includes('*')) {
             return callback(null, true);
         }
+
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+};
+
+app.use(cors(corsOptions));
+
+// Middleware to set hostUrl ONCE based on first incoming request
+app.use((req, res, next) => {
+    const protocol = req.protocol;
+    const host = req.headers.host;
+    Config.setHostUrl(protocol, host);
+    next();
+});
+
+// Apply rate limiting only if enabled
+app.use(rateLimiter);
+
+// ===============================
+// ✅ FIX: Health check route (IMPORTANT for Railway)
+// ===============================
+app.get("/health", (req, res) => {
+    res.status(200).json({
+        status: "ok",
+        message: "API is alive",
+        uptime: process.uptime()
+    });
+});
+
+// Optional root route (prevents Railway 404 confusion)
+app.get("/", (req, res) => {
+    res.status(200).json({
+        status: "ok",
+        message: "Animepahe API Running"
+    });
+});
+
+// Routes
+app.use('/api', testRoutes);
+app.use('/api', homeRoutes);
+app.use('/api', cache(30), queueRoutes);
+app.use('/api', cache(18000), animeListRoutes);
+app.use('/api', cache(86400), animeInfoRoutes);
+app.use('/api', cache(3600), playRoutes);
+
+// 404 handler (FIXED so it doesn't break Railway healthcheck)
+app.use((req, res, next) => {
+    next(new CustomError(
+        'Route not found. Please check the API documentation at https://github.com/ElijahCodes12345/animepahe-api',
+        404
+    ));
+});
+
+// Error handler
+app.use(errorHandler);
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`API running on http://localhost:${PORT}`);
+});        }
         
         if (allowedOrigins.includes(origin)) {
             callback(null, true);
