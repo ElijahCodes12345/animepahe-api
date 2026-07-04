@@ -60,6 +60,11 @@ app.use((req, res, next) => {
 // Apply rate limiting only if RATE_LIMIT_SECRET is set (only affects your deployment)
 app.use(rateLimiter);
 
+// Health check endpoint for Railway
+app.get('/', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 app.use('/api', testRoutes);
 app.use('/api', homeRoutes); // caching done in homeRoutes
 app.use('/api', cache(30), queueRoutes); // 30 seconds
