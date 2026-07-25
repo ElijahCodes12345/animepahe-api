@@ -4,3 +4,5 @@ codedumpsite/
 data/
 test.js
 .vercel
+.chrome-user-data-patchright/
+.chrome-user-data-patchright-bak/

@@ -4,15 +4,14 @@ const Config = require('../utils/config');
 const { JSDOM } = require('jsdom');
 const vm = require('vm')
 const RequestManager = require("../utils/requestManager");
-const { launchBrowser, closeBrowser } = require('../utils/browser');
+const BrowserService = require('../utils/browser');
 const { CustomError } = require('../middleware/errorHandler');
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 class Animepahe {
     constructor() {
-        // Use /tmp directory for Vercel
-        this.cookiesPath = path.join('/tmp', 'cookies.json');
+        this.cookiesPath = path.join(__dirname, '../data/cookies.json');
         this.cookiesRefreshInterval = 14 * 24 * 60 * 60 * 1000; // 14 days
         this.isRefreshingCookies = false;
         this.activeBrowser = null;
@@ -50,62 +49,38 @@ class Animepahe {
         if (this.isRefreshingCookies) return;
         this.isRefreshingCookies = true;
 
-        const proxy = Config.proxyEnabled ? Config.getRandomProxy() : null;
-
         try {
-            const browser = await launchBrowser(proxy);
-            console.log('Browser singleton obtained for cookie refresh');
 
-            const context = await browser.newContext();
-            const page = await context.newPage();
-
-            // Add stealth plugin
-            await context.addInitScript(() => {
-                Object.defineProperty(navigator, 'webdriver', { get: () => false });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) =>
-                parameters.name === 'notifications'
-                    ? Promise.resolve({ state: Notification.permission })
-                    : originalQuery(parameters);
+            // BrowserService handles the full Cloudflare challenge-solve lifecycle.
+            // render() navigates to the URL, solves Turnstile if present, and
+            // returns the cookies once the challenge is cleared.
+            const result = await BrowserService.render(Config.getUrl('home'), {
+                timeout: 120000,
             });
 
-            console.log('Navigating to URL...');
-            await page.goto(Config.getUrl('home'), {
-                waitUntil: 'networkidle',
-                timeout: 30000, 
-            });
-
-            // Check for DDoS-Guard challenge
-            await page.waitForTimeout(2000);
-            const isChallengeActive = await page.$('#ddg-cookie');
-            if (isChallengeActive) {
-                console.log('Solving DDoS-Guard challenge...');
-                await page.waitForSelector('#ddg-cookie', { state: 'hidden', timeout: 30000 });
-            }
-
-            const cookies = await context.cookies();
+            const cookies = result.cookies;
             if (!cookies || cookies.length === 0) {
                 throw new CustomError('No cookies found after page load', 503);
             }
 
             const cookieData = {
                 timestamp: Date.now(),
+                // Save the UA that was active when cf_clearance was issued.
+                // Cloudflare binds cf_clearance to the exact User-Agent, so we
+                // must restore it on restart or gotScraping requests will be rejected.
+                userAgent: Config.userAgent,
                 cookies,
             };
 
             await fs.mkdir(path.dirname(this.cookiesPath), { recursive: true });
             await fs.writeFile(this.cookiesPath, JSON.stringify(cookieData, null, 2));
 
-            console.log('Cookies refreshed successfully');
-            await context.close();
+            console.log('[Animepahe] ✅ Cookies refreshed');
         } catch (error) {
-            console.error('Cookie refresh error:', error);
+            console.error('[Animepahe] Cookie refresh error:', error.message);
             throw new CustomError(`Failed to refresh cookies: ${error.message}`, 503);
         } finally {
             this.isRefreshingCookies = false;
-            await closeBrowser(proxy);
         }
     }
 
@@ -113,7 +88,6 @@ class Animepahe {
         // If user provided cookies directly, use them
         if (userProvidedCookies) {
             if (typeof userProvidedCookies === 'string' && userProvidedCookies.trim()) {
-                console.log('Using user-provided cookies');
                 Config.setCookies(userProvidedCookies.trim());
                 return userProvidedCookies.trim();
             } else {
@@ -126,17 +100,36 @@ class Animepahe {
             cookieData = JSON.parse(await fs.readFile(this.cookiesPath, 'utf8'));
         } catch (error) {
             // No cookies: must block and refresh
+            console.log('[Animepahe] No cookies.json found — refreshing...');
             await this.refreshCookies();
             cookieData = JSON.parse(await fs.readFile(this.cookiesPath, 'utf8'));
         }
 
-        // Proactive background refresh if cookies are older than 13 days
         const ageInMs = Date.now() - cookieData.timestamp;
-        if (ageInMs > (this.cookiesRefreshInterval - 24 * 60 * 60 * 1000) && !this.isRefreshingCookies) {
+        const hasCfClearance = Array.isArray(cookieData.cookies) &&
+            cookieData.cookies.some(c => c.name === 'cf_clearance');
+
+        // Force a blocking refresh if:
+        //   (a) cookies are older than the refresh interval, OR
+        //   (b) cf_clearance is missing entirely (browser challenge was never solved)
+        if ((ageInMs > this.cookiesRefreshInterval || !hasCfClearance) && !this.isRefreshingCookies) {
+            console.log(`[Animepahe] Cookies need refresh (age: ${Math.round(ageInMs / 86400000)}d, hasCfClearance: ${hasCfClearance}). Refreshing now...`);
+            await this.refreshCookies();
+            cookieData = JSON.parse(await fs.readFile(this.cookiesPath, 'utf8'));
+        } else if (ageInMs > (this.cookiesRefreshInterval - 24 * 60 * 60 * 1000) && !this.isRefreshingCookies) {
+            // Proactive background refresh if cookies are within 1 day of expiring
             this.isRefreshingCookies = true;
             this.refreshCookies()
                 .catch(err => console.error('Background cookie refresh failed:', err))
                 .finally(() => { this.isRefreshingCookies = false; });
+        }
+
+        // Restore the User-Agent that was active when cf_clearance was issued.
+        // Without this, Config.userAgent stays at its default (Chrome/120) after a
+        // server restart, causing gotScraping requests to be rejected by Cloudflare
+        // even though the cookies themselves are still valid.
+        if (cookieData.userAgent) {
+            Config.userAgent = cookieData.userAgent;
         }
 
         const cookieHeader = cookieData.cookies
@@ -152,12 +145,30 @@ class Animepahe {
             const url = new URL(endpoint, Config.getUrl('home')).toString();
             return await RequestManager.fetchApiData(url, params, cookieHeader);
         } catch (error) {
-            // Only retry with automatic cookies if user didn't provide cookies
-            if (!userProvidedCookies && (error.response?.status === 401 || error.response?.status === 403)) {
-                await this.refreshCookies();
-                return this.fetchApiData(endpoint, params, userProvidedCookies);
+            // Retry once with fresh cookies if:
+            //   - user didn't supply cookies, AND
+            //   - the error is an auth failure (401/403) OR an anti-bot challenge (503)
+            const isChallenge = !userProvidedCookies && (
+                error.statusCode === 401 ||
+                error.statusCode === 403 ||
+                error.statusCode === 503 ||
+                error.response?.status === 401 ||
+                error.response?.status === 403 ||
+                (error.message && error.message.includes('Anti-bot challenge'))
+            );
+
+            if (isChallenge && !this._retryingFetch) {
+                console.warn('[Animepahe] Anti-bot / auth error detected — refreshing cookies and retrying...');
+                this._retryingFetch = true;
+                try {
+                    await this.refreshCookies();
+                    return await this.fetchApiData(endpoint, params, userProvidedCookies);
+                } finally {
+                    this._retryingFetch = false;
+                }
             }
-            throw new CustomError(error.message || 'Failed to fetch API data', error.response?.status || 503);
+
+            throw new CustomError(error.message || 'Failed to fetch API data', error.statusCode || error.response?.status || 503);
         }
     }
 
@@ -190,14 +201,30 @@ class Animepahe {
         }
 
         const url = `${Config.getUrl('animeInfo')}${animeId}`;
-        const cookieHeader = await this.getCookies();
-        const html = await RequestManager.fetch(url, cookieHeader);
+        let cookieHeader = await this.getCookies();
 
-        if (!html) {
-            throw new CustomError('Failed to fetch anime info', 503);
+        try {
+            const html = await RequestManager.fetch(url, cookieHeader);
+            if (!html) throw new CustomError('Failed to fetch anime info', 503);
+            return html;
+        } catch (error) {
+            // If we got a CF challenge, refresh cookies and retry once
+            const isChallenge = error.message && error.message.includes('Anti-bot challenge');
+            if (isChallenge && !this._retryingScrape) {
+                console.warn('[Animepahe] Anti-bot challenge on anime info page — refreshing cookies and retrying...');
+                this._retryingScrape = true;
+                try {
+                    await this.refreshCookies();
+                    cookieHeader = await this.getCookies();
+                    const html = await RequestManager.fetch(url, cookieHeader);
+                    if (!html) throw new CustomError('Failed to fetch anime info after cookie refresh', 503);
+                    return html;
+                } finally {
+                    this._retryingScrape = false;
+                }
+            }
+            throw error;
         }
-
-        return html;
     }
 
     async scrapeAnimeList(tag1, tag2) {
@@ -232,7 +259,7 @@ class Animepahe {
         } catch (error) {
             if (
                 error.response?.status === 403 ||
-                (error.message && error.message.includes('DDoS-Guard authentication required'))
+                (error.message && error.message.includes('Anti-bot challenge'))
             ) {
                 await this.refreshCookies();
                 cookieHeader = await this.getCookies();

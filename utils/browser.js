@@ -1,230 +1,420 @@
-const fs = require('fs/promises');
+const os   = require('os');
 const path = require('path');
-const { existsSync } = require('fs');
-const os = require('os');
-// const config = require('../utils/config');
-
-let chromiumBinary = null;
-let chromium = null;
-let useServerlessChromium = false;
-let playwrightExtraAvailable = false;
-
-// Try to load playwright-extra and stealth plugin if installed and opt-in via USE_STEALTH
-// Setting USE_STEALTH=true enables playwright-extra + stealth plugin. Otherwise we keep
-// the original Playwright loading behavior.
-if (String(process.env.USE_STEALTH).toLowerCase() === 'true') {
-    try {
-        const playwrightExtra = require('playwright-extra');
-        const stealth = require('playwright-extra-plugin-stealth')();
-        // Use playwright-extra's chromium and register stealth plugin
-        chromium = playwrightExtra.chromium;
-        chromium.use(stealth);
-        playwrightExtraAvailable = true;
-        console.log('Using playwright-extra with stealth plugin (USE_STEALTH=true)');
-    } catch (err) {
-        console.warn('USE_STEALTH=true but playwright-extra or stealth plugin not installed; falling back to regular Playwright');
-    }
-}
-
-try {
-    // Load serverless-compatible Chromium binary and core playwright if not set
-    chromiumBinary = require('@sparticuz/chromium');
-
-    // If we didn't already set chromium via playwright-extra, try playwright-core
-    if (!chromium) chromium = require('playwright-core').chromium;
-
-    // Only use serverless chromium on Linux
-    if (os.platform() === 'linux') {
-        useServerlessChromium = true;
-    } else {
-        console.warn('⚠️ Detected non-Linux OS. Disabling @sparticuz/chromium for local dev.');
-    }
-} catch (e) {
-    // Fallback to full Playwright (e.g. local dev) if not already set
-    if (!chromium) {
-        console.warn('Falling back to full Playwright (probably running locally)');
-        chromium = require('playwright').chromium;
-    }
-}
-
-const activeBrowsers = new Map(); // Map<proxyKey, activeBrowser>
-const browserPromises = new Map(); // Map<proxyKey, browserPromise>
-const refCounts = new Map(); // Map<proxyKey, count>
-const closeTimeouts = new Map(); // Map<proxyKey, timeout>
+const fs   = require('fs');
+const { createCursor } = require('ghost-cursor');
+const Config = require('./config');
 
 /**
- * Launches or returns an existing Chromium browser instance for a specific proxy.
- * Implements a singleton pattern keyed by proxy to ensure IP consistency.
- * @param {string|null} proxy - The proxy URL to use (or null for no proxy)
+ * BrowserService
+ *
+ * Wraps patchright (patched Playwright) to bypass Cloudflare Turnstile /
+ * managed challenges. Uses a persistent Chrome context so cf_clearance
+ * cookies survive across requests.
+ *
+ * Public API:
+ *   browserService.render(url, options)  → { content, cookies, url, status }
+ *   browserService.fetch(url, options)   → { ...render, data }
+ *
+ * NOTE: patchright requires a real Chrome install and a GUI-capable host.
+ *       It does NOT work on serverless platforms (Vercel, Netlify, etc.).
  */
-async function launchBrowser(proxy = null) {
-    const proxyKey = proxy || 'no-proxy';
-    
-    // Increment reference count for this specific proxy
-    const currentCount = refCounts.get(proxyKey) || 0;
-    refCounts.set(proxyKey, currentCount + 1);
-    
-    // Clear any pending close timeout for this specific proxy
-    const existingTimeout = closeTimeouts.get(proxyKey);
-    if (existingTimeout) {
-        clearTimeout(existingTimeout);
-        closeTimeouts.delete(proxyKey);
+class BrowserService {
+    constructor() {
+        /** @type {import('patchright').BrowserContext|null} */
+        this.context = null;
+        this._launchLock   = null;
+        this._idleTimer    = null;
+        this._idleTimeoutMs = 5 * 60 * 1000; // 5 minutes
+        this._hooksRegistered = false;
+
+        this._registerProcessHooks();
     }
 
-    // Return existing promise if already launching/launched
-    if (browserPromises.has(proxyKey)) {
-        return browserPromises.get(proxyKey);
+    // ─────────────────────────────────────────────────────────────────────────
+    // Internal helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    _getChromePath() {
+        const candidates = [
+            process.env.LOCALAPPDATA
+                ? path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe')
+                : null,
+            'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+            'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+            '/usr/bin/google-chrome',
+            '/usr/bin/chromium-browser',
+            process.env.CHROME_BIN || null,
+        ].filter(Boolean);
+
+        for (const p of candidates) {
+            if (fs.existsSync(p)) return p;
+        }
+        return undefined; // let patchright discover its bundled browser
     }
 
-    const promise = (async () => {
-        const isServerless = process.env.VERCEL || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME;
-        const isProduction = process.env.NODE_ENV === 'production';
-        const isLinux = process.platform === 'linux';
-        
-        const baseArgs = [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-blink-features=AutomationControlled',
-            '--disable-gpu',
-            '--disable-background-networking',
-            '--disable-default-apps',
-            '--disable-extensions',
-            '--disable-infobars',
-            '--disable-notifications',
-            '--disable-offline-sync',
-            '--disable-sync',
-            '--disable-translate',
-            '--no-first-run',
-            '--no-zygote'
-        ];
+    _getPlaywrightProxy() {
+        if (!Config.proxyEnabled || Config.proxies.length === 0) return null;
+        const raw = Config.getRandomProxy();
+        if (!raw) return null;
+        try {
+            const formatted = raw.startsWith('http') ? raw : 'http://' + raw;
+            const parsed    = new URL(formatted);
+            return {
+                server:   `${parsed.protocol}//${parsed.host}`,
+                username: parsed.username ? decodeURIComponent(parsed.username) : undefined,
+                password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+            };
+        } catch (_) {
+            return { server: raw };
+        }
+    }
 
-        const serverlessArgs = [
-            '--disable-background-timer-throttling',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-renderer-backgrounding',
-            '--disable-features=TranslateUI',
-            '--disable-ipc-flooding-protection',
-            '--disable-hang-monitor',
-            '--disable-prompt-on-repost',
-            '--disable-domain-reliability',
-            '--disable-component-extensions-with-background-pages',
-            '--memory-pressure-off',
-            '--max_old_space_size=4096'
-        ];
+    /** Ensure the persistent browser context is running. */
+    async _ensureContext(forceDirect = false) {
+        this._resetIdleTimer();
+        if (this.context) return this.context;
+        if (this._launchLock) {
+            await this._launchLock;
+            return this.context;
+        }
+        this._launchLock = this._launch(forceDirect);
+        try {
+            this.context = await this._launchLock;
+        } finally {
+            this._launchLock = null;
+        }
+        this._resetIdleTimer();
+        return this.context;
+    }
 
-        const envHeadless = typeof process.env.CHROME_HEADLESS !== 'undefined'
-            ? String(process.env.CHROME_HEADLESS).toLowerCase() === 'true'
-            : null;
+    _resetIdleTimer() {
+        if (this._idleTimer) {
+            clearTimeout(this._idleTimer);
+            this._idleTimer = null;
+        }
+        this._idleTimer = setTimeout(async () => {
+            if (this.context) {
+                console.log('[BrowserService] 💤 Idle timeout reached (5m). Closing browser context...');
+                await this.close();
+            }
+        }, this._idleTimeoutMs);
+    }
 
-        const defaultHeadless = (isServerless || isProduction || isLinux) ? true : false;
+    _registerProcessHooks() {
+        if (this._hooksRegistered) return;
+        this._hooksRegistered = true;
 
-        const launchOptions = {
-            headless: envHeadless === null ? defaultHeadless : envHeadless,
-            args: isServerless ? [...baseArgs, ...serverlessArgs] : baseArgs,
-            timeout: isServerless ? 30000 : 60000
+        const cleanup = () => {
+            if (this.context) {
+                console.log('[BrowserService] Process exiting. Closing browser context...');
+                this.close().catch(() => {});
+            }
         };
 
-        // Add proxy if provided
-        if (proxy) {
-            // We use the same formatting as RequestManager
-            const formatted = (proxy.startsWith('http://') || proxy.startsWith('https://') || proxy.startsWith('socks5://'))
-                ? proxy 
-                : 'http://' + proxy;
-            
-            try {
-                const parsedUrl = new URL(formatted);
-                launchOptions.proxy = {
-                    server: `${parsedUrl.protocol}//${parsedUrl.host}`
-                };
-                if (parsedUrl.username) {
-                    launchOptions.proxy.username = decodeURIComponent(parsedUrl.username);
-                }
-                if (parsedUrl.password) {
-                    launchOptions.proxy.password = decodeURIComponent(parsedUrl.password);
-                }
-                console.log(`Configuring browser singleton with proxy: ${parsedUrl.host}`);
-            } catch (e) {
-                console.error(`Error parsing proxy for browser launch: ${e.message}`);
-            }
-        }
+        process.once('exit',   cleanup);
+        process.once('SIGINT',  () => { cleanup(); process.exit(0); });
+        process.once('SIGTERM', () => { cleanup(); process.exit(0); });
+        process.once('SIGHUP',  () => { cleanup(); process.exit(0); });
+    }
 
-        launchOptions.args.push(
-            '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        );
+    // ─────────────────────────────────────────────────────────────────────────
+    // Browser launch
+    // ─────────────────────────────────────────────────────────────────────────
 
-        if (useServerlessChromium && chromiumBinary) {
-            try {
-                const executablePath = await chromiumBinary.executablePath();
-                if (existsSync(executablePath)) {
-                    launchOptions.executablePath = executablePath;
-                    launchOptions.args = [...chromiumBinary.args, ...launchOptions.args];
-                }
-            } catch (error) {
-                console.error('Error setting up serverless Chromium:', error);
-            }
-        }
+    async _launch(forceDirect = false) {
+        const { chromium } = require('patchright');
+        const profileDir   = path.join(__dirname, '../.chrome-user-data-patchright');
+        const execPath     = this._getChromePath();
 
-        console.log(`Launching browser singleton [${proxyKey}] with headless=${launchOptions.headless}`);
-        
+        const args = [
+            '--no-sandbox',
+            '--disable-blink-features=AutomationControlled',
+            '--window-size=1366,768',
+            '--disable-infobars',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-gpu',
+            '--disable-dev-shm-usage',
+            '--disable-notifications',
+        ];
+
+        const proxy = !forceDirect ? this._getPlaywrightProxy() : null;
+        if (proxy?.server) console.log(`[BrowserService] Using proxy: ${proxy.server}`);
+
+        console.log('[BrowserService] Launching Chrome via patchright...');
+
+        const ctx = await chromium.launchPersistentContext(profileDir, {
+            executablePath: execPath,
+            headless:       false,
+            viewport:       { width: 1366, height: 768 },
+            args,
+            ignoreDefaultArgs: ['--enable-automation', '--enable-blink-features=IdleDetection'],
+            ...(proxy?.server ? { proxy } : {}),
+        });
+
+        console.log('[BrowserService] ✅ Context launched');
+        await this._syncUserAgent(ctx);
+        return ctx;
+    }
+
+    async _syncUserAgent(ctx) {
         try {
-            const browser = await chromium.launch(launchOptions);
-            activeBrowsers.set(proxyKey, browser);
-            return browser;
-        } catch (error) {
-            console.error(`Failed to launch browser [${proxyKey}]:`, error);
-            const fallbackOptions = {
-                headless: true,
-                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-            };
-            const browser = await chromium.launch(fallbackOptions);
-            activeBrowsers.set(proxyKey, browser);
-            return browser;
-        }
-    })();
+            const ua = await ctx.newPage().then(async p => {
+                const agent = await p.evaluate(() => navigator.userAgent);
+                await p.close();
+                return agent;
+            });
+            if (ua) Config.userAgent = ua;
+        } catch (_) {}
+    }
 
-    browserPromises.set(proxyKey, promise);
-    return promise;
-}
+    // ─────────────────────────────────────────────────────────────────────────
+    // Public API
+    // ─────────────────────────────────────────────────────────────────────────
 
-/**
- * Decrements the reference count and closes the browser for a specific proxy if it reaches zero.
- * @param {string|null} proxy - The proxy URL used (or null for no proxy)
- */
-async function closeBrowser(proxy = null) {
-    const proxyKey = proxy || 'no-proxy';
-    let currentCount = refCounts.get(proxyKey) || 0;
-    currentCount--;
-    
-    if (currentCount <= 0) {
-        currentCount = 0;
-        refCounts.set(proxyKey, 0);
-        
-        // Clear any existing timeout
-        if (closeTimeouts.has(proxyKey)) {
-            clearTimeout(closeTimeouts.get(proxyKey));
+    /**
+     * Fetch a URL through Chrome, solving any Cloudflare challenge.
+     * @returns {{ content, cookies, url, status, data }}
+     */
+    async fetch(url, options = {}) {
+        const res = await this.render(url, options);
+        if (options.responseType === 'json') {
+            try {
+                let body = res.content;
+                const m  = body.match(/<pre[^>]*>(.*?)<\/pre>/s);
+                if (m) body = m[1];
+                body = body.replace(/<[^>]*>?/gm, '');
+                return { ...res, data: JSON.parse(body) };
+            } catch (_) {
+                console.warn('[BrowserService] JSON parse failed, returning raw string');
+                return { ...res, data: res.content };
+            }
         }
-        
-        const timeout = setTimeout(async () => {
-            if ((refCounts.get(proxyKey) || 0) === 0 && activeBrowsers.has(proxyKey)) {
-                console.log(`Closing browser singleton [${proxyKey}] (idle)`);
-                const browserToClose = activeBrowsers.get(proxyKey);
-                activeBrowsers.delete(proxyKey);
-                browserPromises.delete(proxyKey);
-                refCounts.delete(proxyKey);
-                try {
-                    await browserToClose.close();
-                } catch (e) {
-                    console.error(`Error closing browser [${proxyKey}]:`, e.message);
+        return { ...res, data: res.content };
+    }
+
+    /**
+     * Navigate to a URL, solve CF challenge if present, return page content.
+     * @returns {{ content, cookies, url, status }}
+     */
+    async render(url, options = {}) {
+        const ctx = await this._ensureContext(!!options.forceDirect);
+        const page = await ctx.newPage();
+
+        const navTimeout = options.timeout || 120000;
+
+        try {
+            // Cookie freshness guard: clear expired cf_clearance before navigating
+            // so Cloudflare issues a fresh (solvable) challenge instead of a hard one.
+            const domainHost = new URL(url).hostname;
+            const allCookies = await ctx.cookies().catch(() => []);
+            const cfCookie   = allCookies.find(c =>
+                c.name === 'cf_clearance' &&
+                (c.domain === domainHost || c.domain === '.' + domainHost ||
+                 domainHost.endsWith(c.domain.replace(/^\./, '')))
+            );
+            if (cfCookie) {
+                const expiresMs = cfCookie.expires > 0 ? cfCookie.expires * 1000 : Infinity;
+                const safetyMs  = 20 * 60 * 1000; // treat as expired 20 min early
+                if (Date.now() + safetyMs >= expiresMs) {
+                    const keep = allCookies.filter(c =>
+                        c.domain !== domainHost && c.domain !== '.' + domainHost
+                    );
+                    await ctx.clearCookies().catch(() => {});
+                    if (keep.length) await ctx.addCookies(keep).catch(() => {});
+                    console.log(`[BrowserService] Cleared stale cf_clearance for ${domainHost}`);
                 }
             }
-            closeTimeouts.delete(proxyKey);
-        }, 5000);
-        
-        closeTimeouts.set(proxyKey, timeout);
-    } else {
-        refCounts.set(proxyKey, currentCount);
+
+            // Bring this page to front so Chrome shows the challenge (not the blank initial tab)
+            await page.bringToFront().catch(() => {});
+
+            try {
+                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            } catch (e) {
+                if (!e.message.includes('Timeout')) throw e;
+            }
+
+            await this._solveChallenge(page, url, navTimeout);
+
+            // Post-solve guard: if still on CF challenge, one final networkidle navigate
+            const postTitle = await page.title().catch(() => '');
+            const postUrl   = page.url();
+            if (postTitle.includes('Just a moment') ||
+                postUrl.includes('cf_chl_rt_tk') ||
+                postUrl.includes('cf_chl_f_tk')) {
+                try { await page.goto(url, { waitUntil: 'networkidle', timeout: 25000 }); } catch (_) {}
+            }
+
+            // Final check — if still challenged after all attempts, fail hard
+            const finalTitle = await page.title().catch(() => '');
+            const finalUrl   = page.url();
+            if (finalTitle.includes('Just a moment') ||
+                finalUrl.includes('cf_chl_rt_tk') ||
+                finalUrl.includes('cf_chl_f_tk')) {
+                throw new Error('[BrowserService] Could not bypass Cloudflare — still on challenge page');
+            }
+
+            const content = await page.content();
+            const cookies = await ctx.cookies(url);
+
+            return { content, cookies, url: finalUrl, status: 200 };
+        } finally {
+            await page.close().catch(() => {});
+            this._resetIdleTimer();
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Challenge solver
+    // ─────────────────────────────────────────────────────────────────────────
+
+    async _solveChallenge(page, originalUrl, timeout) {
+        const t0 = Date.now();
+        console.log(`[BrowserService] Starting challenge check for ${originalUrl}`);
+
+        let reloadCount       = 0;
+        let clearanceSeenAt   = null;
+        let lastTurnstileClick = 0;
+
+        let cursor = null;
+        try {
+            cursor = createCursor(page, { x: 400 + Math.random() * 400, y: 200 + Math.random() * 200 });
+        } catch (_) {}
+
+        while (Date.now() - t0 < timeout) {
+            const title    = await page.title().catch(() => '');
+            const bodyText = await page.evaluate(() => document.body?.innerText ?? '').catch(() => '');
+
+            // page.content() throws if the page is mid-navigation (e.g. after a successful CF redirect).
+            // Wait for it to settle rather than treating the empty string as a failure.
+            let html = '';
+            try {
+                html = await page.content();
+            } catch (e) {
+                if (e.message.includes('navigating')) {
+                    await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+                    html = await page.content().catch(() => '');
+                }
+            }
+            const pageUrl  = page.url();
+
+            const isCf = title.includes('Just a moment') ||
+                          pageUrl.includes('cf_chl_rt_tk') ||
+                          pageUrl.includes('cf_chl_f_tk') ||
+                          html.includes('cf-please-wait') ||
+                          (html.includes('ray-id') && html.includes('cf-error'));
+
+            if (!isCf && (html.length > 500 || bodyText.length > 100)) {
+                console.log(`[BrowserService] ✅ Bypassed (+${Date.now() - t0}ms)`);
+                return;
+            }
+
+            const cookies      = await page.context().cookies(originalUrl).catch(() => []);
+            const hasClearance = cookies.some(c => c.name === 'cf_clearance');
+
+            if (hasClearance) {
+                if (!clearanceSeenAt) {
+                    console.log('[BrowserService] 🌟 cf_clearance acquired — waiting for page transition...');
+                    clearanceSeenAt = Date.now();
+                }
+
+                // Wait 45s before first reload — each reload presents a harder fresh Turnstile
+                if (Date.now() - clearanceSeenAt > 45000) {
+                    if (reloadCount < 1) {
+                        reloadCount++;
+                        console.log(`[BrowserService] 🔄 Stuck with clearance — reloading (${reloadCount}/1)...`);
+                        if (cursor) await cursor.moveTo({ x: 500 + Math.random() * 200, y: 300 + Math.random() * 200 }).catch(() => {});
+                        try { await page.goto(originalUrl, { waitUntil: 'networkidle', timeout: 30000 }); } catch (_) {}
+                        clearanceSeenAt = Date.now();
+                        lastTurnstileClick = 0; // allow immediate click on fresh page
+                        await new Promise(r => setTimeout(r, 3000));
+                        continue;
+                    } else {
+                        console.log(`[BrowserService] ⚠️  Returning with cf_clearance (title: "${title}", url: ${page.url()})`);
+                        return;
+                    }
+                } else {
+                    if (cursor && Math.random() > 0.5) {
+                        await cursor.moveTo({ x: 400 + Math.random() * 400, y: 200 + Math.random() * 400 }).catch(() => {});
+                    }
+                }
+            }
+
+            // Try clicking Turnstile every 8s.
+            // If the click lands, reset clearanceSeenAt so the reload timer
+            // restarts — the page may already be transitioning away.
+            if (Date.now() - lastTurnstileClick > 8000) {
+                const clicked = await this._tryClickTurnstile(page, cursor);
+                if (clicked && clearanceSeenAt) {
+                    clearanceSeenAt = Date.now();
+                }
+                lastTurnstileClick = Date.now();
+            }
+
+            await new Promise(r => setTimeout(r, 1500));
+        }
+
+        throw new Error(`[BrowserService] Challenge could not be resolved after ${timeout}ms`);
+    }
+
+    async _tryClickTurnstile(page, cursor) {
+        try {
+            const frames = page.frames();
+            const turnstileFrames = frames.filter(f => {
+                const u = f.url();
+                return u.includes('challenges.cloudflare.com') || u.includes('turnstile');
+            });
+
+            if (turnstileFrames.length === 0) return false;
+
+            for (const frame of turnstileFrames) {
+                console.log(`[BrowserService] 🎯 Turnstile frame: ${frame.url().slice(0, 90)}`);
+
+                // Wait for the widget's DOM to be ready before attempting to click
+                await frame.waitForLoadState('domcontentloaded', { timeout: 3000 }).catch(() => {});
+                await new Promise(r => setTimeout(r, 800));
+
+                // Method 1: click input[type="checkbox"] via locator (longer timeout to allow widget init)
+                try {
+                    const checkbox = frame.locator('input[type="checkbox"]');
+                    if (await checkbox.count({ timeout: 4000 }) > 0) {
+                        await checkbox.first().scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
+                        await checkbox.first().click({ delay: 80 + Math.random() * 120, timeout: 5000 });
+                        console.log('[BrowserService] 👆 Clicked Turnstile checkbox via locator');
+                        return true;
+                    }
+                } catch (_) {}
+
+                // Method 2: click by bounding box of the iframe element
+                const el  = await frame.frameElement().catch(() => null);
+                if (!el) continue;
+                const box = await el.boundingBox().catch(() => null);
+                if (!box || box.width === 0 || box.height === 0) continue;
+
+                const clickX = box.x + 25;
+                const clickY = box.y + (box.height / 2);
+
+                console.log(`[BrowserService] 👆 Clicking Turnstile (bbox) at (${Math.round(clickX)}, ${Math.round(clickY)})`);
+                if (cursor) await cursor.moveTo({ x: clickX, y: clickY }).catch(() => {});
+                await page.mouse.click(clickX, clickY, { delay: 80 + Math.random() * 100 });
+                return true;
+            }
+        } catch (_) {}
+        return false;
+    }
+
+
+    /**
+     * Gracefully close the browser context (e.g. on server shutdown).
+     */
+    async close() {
+        if (this.context) {
+            await this.context.close().catch(() => {});
+            this.context = null;
+            console.log('[BrowserService] Context closed.');
+        }
     }
 }
 
-module.exports = { launchBrowser, closeBrowser };
+module.exports = new BrowserService();

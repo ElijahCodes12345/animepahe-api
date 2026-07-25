@@ -19,14 +19,14 @@
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^4.21.2",
+    "ghost-cursor": "^1.4.2",
     "got-scraping": "^4.2.1",
     "http-proxy-agent": "^9.0.0",
     "https-proxy-agent": "^9.0.0",
     "jsdom": "^22.1.0",
+    "patchright": "^1.61.1",
     "playwright": "^1.52.0",
     "playwright-core": "^1.52.0",
-    "playwright-extra": "^4.3.6",
-    "playwright-extra-plugin-stealth": "^0.0.1",
     "redis": "^5.5.6"
   },
   "devDependencies": {

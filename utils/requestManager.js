@@ -1,4 +1,4 @@
-const { launchBrowser, closeBrowser } = require('./browser');
+const BrowserService = require('./browser');
 const cloudscraper = require('cloudscraper');
 const axios = require('axios');
 const Config = require('./config');
@@ -167,17 +167,29 @@ class RequestManager {
 
     static async fetch(url, cookieHeader, type = 'default') {
         if (type === 'default') {
-            return this.fetchApiData(url, {}, cookieHeader);
+            // HTML page scrape — use gotScraping with the supplied cookies.
+            // fetchApiData is JSON-only and rejects HTML responses as CF challenges.
+            // Must pass the same User-Agent that was used when cf_clearance was issued.
+            return this.scrapeWithGotScraping(url, {
+                userAgent: Config.userAgent,
+                headers: {
+                    'Cookie': cookieHeader || '',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'sec-fetch-dest': 'document',
+                    'sec-fetch-mode': 'navigate',
+                    'sec-fetch-site': 'same-origin',
+                }
+            });
         } else if (type === 'heavy') {
             return this.scrapeWithPlaywright(url);
         } else {
-            console.trace('Invalid fetch type specified. Please use "json", "heavy", or "default".');
+            console.trace('Invalid fetch type specified. Please use "heavy", or "default".');
             return null;
         }
     }
 
     /**
-     * Legacy method - now uses the universal cloudscraper method
+     * Legacy method - uses cloudscraper for simple HTML fetches
      */
     static async scrapeWithCloudScraper(url, options = {}) {
         console.log(`Fetching HTML from ${url}...`);
@@ -203,13 +215,19 @@ class RequestManager {
     }
 
     /**
-     * Scrape using got-scraping to bypass Cloudflare
+     * Scrape using got-scraping to bypass simple bot protection.
+     * Pass options.userAgent to pin the User-Agent (required when using cf_clearance
+     * cookies, since Cloudflare ties the token to the exact UA that solved the challenge).
      */
     static async scrapeWithGotScraping(url, options = {}) {
         console.log(`Fetching HTML with GotScraping from ${url}...`);
         
         const { gotScraping } = await import('got-scraping');
         
+        // Use the explicitly supplied UA, or fall back to Config.userAgent, then
+        // let got-scraping auto-generate one as a last resort.
+        const userAgent = options.userAgent || Config.userAgent || undefined;
+
         try {
             const response = await gotScraping({
                 url: url,
@@ -218,6 +236,7 @@ class RequestManager {
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.9',
                     'Connection': 'keep-alive',
+                    ...(userAgent ? { 'User-Agent': userAgent } : {}),
                     ...options.headers
                 },
                 headerGeneratorOptions: {
@@ -229,7 +248,16 @@ class RequestManager {
                 throwHttpErrors: false,
                 timeout: { request: options.timeout || 30000 }
             });
-            return response.body;
+
+            // Detect Cloudflare challenge in HTML scrape responses too
+            const body = response.body || '';
+            if (body.includes('Just a moment') ||
+                body.includes('challenge-running') ||
+                body.includes('cf-please-wait')) {
+                throw new Error('Anti-bot challenge active — cookies may be stale (Status Code: 503)');
+            }
+
+            return body;
         } catch (error) {
             console.error(`[GotScraping Error] GET ${url}:`, error.message);
             throw error;
@@ -237,128 +265,27 @@ class RequestManager {
     }
 
     /**
-     * Scrape a page using the serverless-compatible Playwright browser as a fallback.
-     * Uses the same launchBrowser() from browser.js which automatically picks
-     * @sparticuz/chromium on Linux/serverless and regular Playwright locally.
+     * Scrape a page using BrowserService (patchright), which automatically
+     * solves Cloudflare Turnstile / managed challenges via a persistent context.
      */
     static async scrapeWithPlaywrightPage(url, options = {}) {
-        console.log(`Fetching HTML with Playwright from ${url}...`);
-        
-        const proxy = Config.proxyEnabled ? Config.getRandomProxy() : null;
-        const browser = await launchBrowser(proxy);
-        try {
-            const context = await browser.newContext({
-                userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                extraHTTPHeaders: {
-                    'Referer': options.referer || Config.baseUrl,
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Upgrade-Insecure-Requests': '1',
-                }
-            });
-
-            await context.addInitScript(() => {
-                Object.defineProperty(navigator, 'webdriver', { get: () => false });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-            });
-
-            const page = await context.newPage();
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: options.timeout || 60000 });
-
-            // Wait a moment for any JS-driven Cloudflare challenges to resolve
-            await page.waitForTimeout(3000);
-
-            const content = await page.content();
-            await context.close();
-            return content;
-        } finally {
-            await closeBrowser(proxy);
-        }
+        console.log(`Fetching HTML with BrowserService (patchright) from ${url}...`);
+        const result = await BrowserService.render(url, { timeout: options.timeout });
+        return result.content;
     }
 
+    /**
+     * @deprecated Use scrapeWithPlaywrightPage instead.
+     * Kept for backward compatibility with routes/scrapers that call this directly.
+     */
     static async scrapeWithPlaywright(url) {
-        console.log('Fetching content from:', url);
-        const proxy = Config.proxyEnabled ? Config.getRandomProxy() : null;
-
-        const browser = await launchBrowser(proxy);
-
-        try {
-            const contextOptions = {};
-
-            if (proxy) {
-                const pwProxy = this.getPlaywrightProxyOptions(proxy);
-                if (pwProxy) {
-                    contextOptions.proxy = pwProxy;
-                }
-            }
-
-            const context = await browser.newContext(contextOptions);
-            const page = await context.newPage();
-
-            // Stealth measures
-            await page.addInitScript(() => {
-                delete navigator.__proto__.webdriver;
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3],
-                });
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-US', 'en'],
-                });
-
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) =>
-                    parameters.name === 'notifications'
-                        ? Promise.resolve({ state: Notification.permission })
-                        : originalQuery(parameters);
-            });
-
-            // Realistic headers
-            await page.setExtraHTTPHeaders({
-                'User-Agent': Config.userAgent,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': 'https://www.google.com/',
-                'Cache-Control': 'no-cache',
-            });
-
-            console.log('Navigating to URL...');
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
-
-            await page.waitForTimeout(10000); // DDoS challenge buffer
-
-            const isApiRequest = url.includes('/api') || url.endsWith('.json');
-
-            if (!isApiRequest) {
-                try {
-                    await page.waitForSelector('.episode-wrap, .episode-list', { timeout: 60000 });
-                } catch (e) {
-                    console.log('Selector not found, continuing...');
-                }
-            } else {
-                try {
-                    await page.waitForFunction(() => {
-                        const text = document.body.textContent;
-                        return text.includes('{') && text.includes('}');
-                    }, { timeout: 60000 });
-                } catch (e) {
-                    console.log('API content not found, continuing...');
-                }
-            }
-
-            const content = await page.content();
-            await context.close();
-            return content;
-        } finally {
-            await closeBrowser(proxy);
-        }
+        return this.scrapeWithPlaywrightPage(url);
     }
 
     static async fetchJson(url) {
         const html = await this.fetch(url);
         
         try {
-            // Try to parse the content as JSON
             const jsonMatch = html.match(/<pre[^>]*>([\s\S]*?)<\/pre>/i) || 
                              html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
             
@@ -386,208 +313,88 @@ class RequestManager {
         }
     }
 
+    /**
+     * Fetch a Cloudflare-protected page using BrowserService (patchright).
+     */
     static async fetchCloudflareProtected(url, options = {}) {
         console.log('Fetching Cloudflare-protected content from:', url);
-        
-        const proxy = Config.proxyEnabled ? Config.getRandomProxy() : null;
-
-        const browser = await launchBrowser(proxy);
-
-        try {
-            const contextOptions = {
-                userAgent: Config.userAgent,
-                viewport: { width: 1920, height: 1080 },
-                extraHTTPHeaders: {
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Cache-Control': 'no-cache',
-                    'Pragma': 'no-cache',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'cross-site',
-                    'Sec-Fetch-User': '?1',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Referer': options.referer || Config.getUrl('home')
-                }
-            };
-
-            if (proxy) {
-                const pwProxy = this.getPlaywrightProxyOptions(proxy);
-                if (pwProxy) {
-                    contextOptions.proxy = pwProxy;
-                }
-            }
-
-            const context = await browser.newContext(contextOptions);
-            const page = await context.newPage();
-
-            await page.addInitScript(() => {
-                Object.defineProperty(navigator, 'webdriver', { get: () => false });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-
-                // Add chrome object
-                window.chrome = {
-                    runtime: {},
-                    loadTimes: function() {},
-                    csi: function() {},
-                    app: {}
-                };
-
-                // Mock permissions
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) =>
-                    parameters.name === 'notifications'
-                        ? Promise.resolve({ state: Notification.permission })
-                        : originalQuery(parameters);
-            });
-
-            console.log('Navigating to URL...');
-            await page.goto(url, { 
-                waitUntil: 'domcontentloaded', 
-                timeout: 60000 
-            });
-
-            // Handle Cloudflare challenge
-            await this.handleCloudflareChallenge(page);
-
-            const content = await page.content();
-            await context.close();
-            
-            return content;
-        } finally {
-            await closeBrowser(proxy);
-        }
+        const result = await BrowserService.render(url, { timeout: options.timeout });
+        return result.content;
     }
 
-    static async handleCloudflareChallenge(page) {
-        console.log('Checking for Cloudflare challenge...');
-        
-        // for any immediate redirects
-        await page.waitForTimeout(3000);
-        
-        // Check for various challenge indicators
-        const challengeSelectors = [
-            '#cf-challenge-running',
-            '.cf-challenge-form',
-            '[data-ray]', // Cloudflare Ray ID
-            'title:has-text("Just a moment")',
-            'h1:has-text("Please wait")',
-            'div:has-text("Checking your browser")',
-            'div:has-text("DDoS protection")'
-        ];
+    /**
+     * Fetch JSON API data using got-scraping (fast HTTP, not a browser page).
+     * BrowserService is used only to prime the cf_clearance cookie the first
+     * time — subsequent calls reuse the same cookie for speed.
+     */
+    static async fetchApiData(url, params = {}, cookieHeader = null) {
+        // 1. Build full URL with query params
+        const queryString = new URLSearchParams(params).toString();
+        const fullUrl = queryString ? `${url}?${queryString}` : url;
 
-        let challengeFound = false;
-        for (const selector of challengeSelectors) {
-            try {
-                const element = await page.$(selector);
-                if (element) {
-                    challengeFound = true;
-                    console.log(`Challenge detected with selector: ${selector}`);
-                    break;
-                }
-            } catch (e) {
-                // Continue checking other selectors
-            }
+        // 2. If no cookie supplied, prime cf_clearance via BrowserService
+        if (!cookieHeader) {
+            const origin = new URL(url).origin;
+            const result = await BrowserService.render(origin, { timeout: 120000 });
+            cookieHeader = result.cookies
+                .map(c => `${c.name}=${c.value}`)
+                .join('; ');
         }
 
-        if (challengeFound || page.url().includes('cdn-cgi/challenge')) {
-            console.log('Cloudflare challenge detected, waiting for resolution...');
-            
-            try {
-                await page.waitForFunction(() => {
-                    const title = document.title.toLowerCase();
-                    const url = window.location.href;
-                    const bodyText = document.body.textContent.toLowerCase();
-                    
-                    // Check if we're no longer on a challenge page
-                    return !title.includes('just a moment') && 
-                        !title.includes('please wait') &&
-                        !url.includes('cdn-cgi/challenge') &&
-                        !bodyText.includes('checking your browser') &&
-                        !bodyText.includes('ddos protection');
-                }, { timeout: 30000 });
-                
-                console.log('Cloudflare challenge resolved successfully');
-                
-                // Additional wait to ensure page is fully loaded
-                await page.waitForTimeout(2000);
-                
-            } catch (timeoutError) {
-                console.warn('Challenge resolution timeout - proceeding anyway');
-                // Don't throw error, let the caller handle the response
-            }
-        } else {
-            console.log('No Cloudflare challenge detected');
-        }
-    }
+        // 3. Lightweight got-scraping request with the CF cookies
+        const { gotScraping } = await import('got-scraping');
+        const response = await gotScraping({
+            url: fullUrl,
+            headers: {
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': Config.getUrl('home'),
+                'User-Agent': Config.userAgent,
+                'dnt': '1',
+                'sec-ch-ua': '"Not A(Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+                'x-requested-with': 'XMLHttpRequest',
+                'Cookie': cookieHeader,
+            },
+            headerGeneratorOptions: {
+                browsers: [{ name: 'chrome', minVersion: 124 }],
+                devices: ['desktop'],
+                locales: ['en-US'],
+                operatingSystems: ['windows'],
+            },
+            throwHttpErrors: false,
+            timeout: { request: 30000 },
+        });
 
-    static async fetchApiData(url, params = {}, cookieHeader) {
+        // 4. Challenge / error detection
+        //    Only reject on actual Cloudflare/bot-protection signals.
+        //    Do NOT use `isHtml` as a blanket trigger — JSON API responses are
+        //    expected here, but a valid HTML body is NOT a challenge by itself.
+        const body = response.body.trimStart();
+        const isCfChallenge =
+            response.statusCode === 403 ||
+            response.statusCode === 503 ||
+            body.includes('Just a moment') ||
+            body.includes('challenge-running') ||
+            body.includes('cf-please-wait') ||
+            body.includes('cf_chl_rt_tk') ||
+            body.includes('cf_chl_f_tk');
+
+        if (isCfChallenge) {
+            throw new CustomError('Anti-bot challenge active — cookies may be stale', 503);
+        }
+
+        if (response.statusCode === 404) throw new CustomError('Resource not found', 404);
+        if (response.statusCode >= 500) throw new CustomError(`Upstream error (${response.statusCode})`, 503);
+
         try {
-            if (!cookieHeader) {
-                throw new CustomError('DDoS-Guard authentication required', 403);
-            }
-            
-            const proxyUrl = Config.proxyEnabled ? Config.getRandomProxy() : null;
-
-            // Build proxy agents for proper authenticated proxy support
-            let httpAgent = undefined;
-            let httpsAgent = undefined;
-            if (proxyUrl) {
-                const { HttpProxyAgent } = await import('http-proxy-agent');
-                const { HttpsProxyAgent } = await import('https-proxy-agent');
-                const formattedProxyUrl = proxyUrl.startsWith('http') ? proxyUrl : 'http://' + proxyUrl;
-                httpAgent = new HttpProxyAgent(formattedProxyUrl);
-                httpsAgent = new HttpsProxyAgent(formattedProxyUrl);
-            }
-
-            const response = await axios.get(url, {
-                params: params,
-                headers: {
-                    'Accept': 'application/json, text/javascript, */*; q=0.01',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Referer': Config.getUrl('home'),
-                    'User-Agent': Config.userAgent,
-                    'Sec-Fetch-*': '?', 
-                    "dnt": "1",
-                    "sec-ch-ua": '"Not A(Brand";v="99", "Microsoft Edge";v="121", "Chromium";v="121"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"Windows"',
-                    "sec-fetch-dest": "empty",
-                    "sec-fetch-mode": "cors",
-                    "sec-fetch-site": "same-origin",
-                    "x-requested-with": "XMLHttpRequest",
-                    'Cookie': cookieHeader
-                },
-                proxy: false,
-                ...(httpAgent ? { httpAgent } : {}),
-                ...(httpsAgent ? { httpsAgent } : {})
-            });
-
-            const responseText = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
-            if (responseText.includes('DDoS-GUARD') || 
-                responseText.includes('checking your browser') ||
-                response.status === 403) {
-                console.log("response: ", responseText);
-                throw new CustomError('DDoS-Guard authentication required, valid cookies required', 403);
-            }
-
-            return response.data;
-        } catch (error) {
-            if (error.response?.status === 407) {
-                const proxyUrl = Config.proxyEnabled ? Config.getRandomProxy() : null;
-                console.error(`[Proxy 407] Proxy authentication failed. Proxy: ${this.maskProxyUrl(proxyUrl)}`);
-                console.error(`[Proxy 407] USE_PROXY=${process.env.USE_PROXY}, PROXIES env length=${(process.env.PROXIES || '').length}`);
-                throw new CustomError('Proxy authentication failed (407). Check proxy credentials in environment.', 407);
-            }
-            if (error.response?.status === 403 || error.response?.status === 502 || error.response?.status === 503) {
-                throw new CustomError('DDoS-Guard authentication required, invalid cookies', 403);
-            }
-            if (error.response?.status === 404) {
-                throw new CustomError('Resource not found', 404);
-            }
-            throw error;
+            return JSON.parse(body);
+        } catch {
+            throw new CustomError('Failed to parse API response as JSON', 503);
         }
     }
 }
