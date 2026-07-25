@@ -200,11 +200,15 @@ The API returns errors in this format:
 
 - Node.js
 - Express
+- Playwright
 - patchright (Playwright wrapper for stealth)
-- got-scraping
+- @sparticuz/chromium
 - Cheerio
 - Axios
-- jsdom & vm
+- got-scraping
+- cloudscraper (changed to above library)
+- jsdom
+- vm
 
 ## Acknowledgments
 
