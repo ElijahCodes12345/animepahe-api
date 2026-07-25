@@ -203,11 +203,11 @@ The API returns errors in this format:
 - Express
 - Playwright
 - patchright (Playwright wrapper for stealth)
+- ghost-cursor
 - @sparticuz/chromium
 - Cheerio
 - Axios
 - got-scraping
-- cloudscraper (changed to above library)
 - jsdom
 - vm
 
