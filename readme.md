@@ -3,8 +3,8 @@
 An unofficial REST API for [Animepahe](https://animepahe.pw/) that provides access to anime information, episodes, and streaming links with direct download support.
 
 > **⚠️ IMPORTANT NOTICE: Hosting & Environment Requirements**  
-> Because this API relies on running a real browser to solve Cloudflare Turnstile anti-bot challenges, **it will likely fail in serverless environments (like Vercel or Netlify)** due to memory limits, missing browser dependencies, and ephemeral storage.  
-> **For a high success rate, you MUST host this on a VPS (Virtual Private Server)** or a robust containerized environment (like Railway or Render) where a persistent Chrome instance can run properly.
+> Because this API relies on running a real browser to solve Cloudflare Turnstile anti-bot challenges, **it will likely fail in serverless environments (like Vercel)** due to memory limits, missing browser dependencies, and ephemeral storage.  
+> **For a high success rate, you should host this on a VPS** or a robust containerized environment (like Railway or Render) where a persistent Chrome instance can run properly (might still fail if server's IP is flagged/unclean).
 
 ## Features
 
