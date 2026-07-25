@@ -190,23 +190,21 @@ The API returns errors in this format:
 }
 ```
 
-## Deployment
+## Deployment & Anti-Bot Bypass
 
-- **Headless Mode:** Automatically enabled on Linux/Production. Use `CHROME_HEADLESS=true/false` to override.
-- **Efficiency:** Uses a shared browser singleton. It closes automatically after 5 seconds of inactivity.
+- **Anti-Bot Challenge solver:** Uses a persistent browser context (`utils/browser.js`) powered by `patchright` to solve Cloudflare Turnstile and managed challenges.
+- **Cookie & User-Agent Synchronization:** Automatically saves solved `cf_clearance` cookies along with the corresponding `User-Agent` to `data/cookies.json` to prevent challenge loops on server restarts.
+- **Efficiency:** Utilizes a shared browser singleton context that automatically suspends/closes after 5 minutes of inactivity to save resources.
 
 ## Technologies Used
 
 - Node.js
 - Express
-- Playwright
-- @sparticuz/chromium
+- patchright (Playwright wrapper for stealth)
+- got-scraping
 - Cheerio
 - Axios
-- got-scraping
-- cloudscraper (changed to above library)
-- jsdom
-- vm
+- jsdom & vm
 
 ## Acknowledgments
 
