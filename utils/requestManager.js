@@ -1,5 +1,4 @@
 const BrowserService = require('./browser');
-const cloudscraper = require('cloudscraper');
 const axios = require('axios');
 const Config = require('./config');
 const { CustomError } = require('../middleware/errorHandler');
@@ -79,7 +78,7 @@ class RequestManager {
         } = options;
 
         if (!url) {
-            throw new CustomError('URL is required for cloudscraper request', 400);
+            throw new CustomError('URL is required for request', 400);
         }
 
         const defaultHeaders = {
@@ -95,47 +94,35 @@ class RequestManager {
             'Sec-Fetch-Site': 'cross-site',
         };
 
-        const requestOptions = {
-            method,
-            uri: url,
-            headers: { ...defaultHeaders, ...headers },
-            followRedirect,
-            followAllRedirects,
-            simple,
-            resolveWithFullResponse,
-            timeout,
-        };
-
-        // Add body data if provided
-        if (form) {
-            requestOptions.form = form;
-            requestOptions.headers['Content-Type'] = 'application/x-www-form-urlencoded';
-        } else if (json) {
-            requestOptions.json = json;
-            requestOptions.headers['Content-Type'] = 'application/json';
-        }
-
         try {
-            console.log(`[Cloudscraper] ${method} ${url}`);
-            const response = await cloudscraper(requestOptions);
+            console.log(`[GotScraping Wrapper] ${method} ${url}`);
+            const { gotScraping } = await import('got-scraping');
+            
+            const gotOptions = {
+                url,
+                method,
+                headers: { ...defaultHeaders, ...headers },
+                followRedirect,
+                throwHttpErrors: false,
+                timeout: { request: timeout }
+            };
+
+            if (form) {
+                gotOptions.form = form;
+            } else if (json) {
+                gotOptions.json = json;
+            }
+
+            const response = await gotScraping(gotOptions);
             
             return {
                 statusCode: response.statusCode,
                 headers: response.headers,
-                body: response.body
+                body: response.body,
+                location: response.headers.location
             };
         } catch (error) {
-            // Handle redirects as responses (not errors)
-            if (error.statusCode === 301 || error.statusCode === 302) {
-                return {
-                    statusCode: error.statusCode,
-                    headers: error.response?.headers || {},
-                    body: error.response?.body || '',
-                    location: error.response?.headers?.location
-                };
-            }
-            
-            console.error(`[Cloudscraper Error] ${method} ${url}:`, error.message);
+            console.error(`[GotScraping Wrapper Error] ${method} ${url}:`, error.message);
             throw error;
         }
     }
@@ -186,32 +173,6 @@ class RequestManager {
             console.trace('Invalid fetch type specified. Please use "heavy", or "default".');
             return null;
         }
-    }
-
-    /**
-     * Legacy method - uses cloudscraper for simple HTML fetches
-     */
-    static async scrapeWithCloudScraper(url, options = {}) {
-        console.log(`Fetching HTML from ${url}...`);
-        
-        const response = await this.cloudscraperGet(url, {
-            headers: {
-                Referer: Config.baseUrl,
-                'Accept-Encoding': 'gzip, deflate, br',
-                'dnt': '1',
-                'sec-ch-ua': '"Not A(Brand";v="99", "Microsoft Edge";v="121", "Chromium";v="121"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"Windows"',
-                'sec-fetch-dest': 'empty',
-                'sec-fetch-mode': 'cors',
-                'sec-fetch-site': 'same-origin',
-                'x-requested-with': 'XMLHttpRequest',
-                ...options.headers
-            },
-            timeout: options.timeout || 20000
-        });
-
-        return response.body;
     }
 
     /**

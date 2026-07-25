@@ -1,4 +1,3 @@
-const cloudscraper = require('cloudscraper');
 const axios = require('axios');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
