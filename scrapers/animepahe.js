@@ -11,14 +11,20 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 class Animepahe {
     constructor() {
-        this.cookiesPath = path.join(__dirname, '../data/cookies.json');
-        this.cookiesRefreshInterval = 14 * 24 * 60 * 60 * 1000; // 14 days
+        // cookiesPath is derived from Config.dataDir so consuming apps can
+        // redirect storage outside of node_modules via:
+        //   animepahe.Config.dataDir = '/your/persistent/path'
         this.isRefreshingCookies = false;
+        this._refreshPromise = null; // shared promise lock — prevents concurrent browser launches
         this.activeBrowser = null;
         this.cloudflareSessionCookies = null
 
         // tracking for current kwik request
         this.currentKwikRequest = null;
+    }
+
+    get cookiesPath() {
+        return require('path').join(Config.dataDir, 'cookies.json');
     }
 
     async initialize() {
@@ -46,42 +52,51 @@ class Animepahe {
     }        
     
     async refreshCookies() {
-        if (this.isRefreshingCookies) return;
-        this.isRefreshingCookies = true;
-
-        try {
-
-            // BrowserService handles the full Cloudflare challenge-solve lifecycle.
-            // render() navigates to the URL, solves Turnstile if present, and
-            // returns the cookies once the challenge is cleared.
-            const result = await BrowserService.render(Config.getUrl('home'), {
-                timeout: 120000,
-            });
-
-            const cookies = result.cookies;
-            if (!cookies || cookies.length === 0) {
-                throw new CustomError('No cookies found after page load', 503);
-            }
-
-            const cookieData = {
-                timestamp: Date.now(),
-                // Save the UA that was active when cf_clearance was issued.
-                // Cloudflare binds cf_clearance to the exact User-Agent, so we
-                // must restore it on restart or gotScraping requests will be rejected.
-                userAgent: Config.userAgent,
-                cookies,
-            };
-
-            await fs.mkdir(path.dirname(this.cookiesPath), { recursive: true });
-            await fs.writeFile(this.cookiesPath, JSON.stringify(cookieData, null, 2));
-
-            console.log('[Animepahe] ✅ Cookies refreshed');
-        } catch (error) {
-            console.error('[Animepahe] Cookie refresh error:', error.message);
-            throw new CustomError(`Failed to refresh cookies: ${error.message}`, 503);
-        } finally {
-            this.isRefreshingCookies = false;
+        // Deduplicate concurrent refresh calls — all callers share the same
+        // promise so only ONE browser is ever launched at a time.
+        if (this._refreshPromise) {
+            console.log('[Animepahe] Cookie refresh already in progress, waiting...');
+            return this._refreshPromise;
         }
+
+        this.isRefreshingCookies = true;
+        this._refreshPromise = (async () => {
+            try {
+                // BrowserService handles the full Cloudflare challenge-solve lifecycle.
+                // render() navigates to the URL, solves Turnstile if present, and
+                // returns the cookies once the challenge is cleared.
+                const result = await BrowserService.render(Config.getUrl('home'), {
+                    timeout: 120000,
+                });
+
+                const cookies = result.cookies;
+                if (!cookies || cookies.length === 0) {
+                    throw new CustomError('No cookies found after page load', 503);
+                }
+
+                const cookieData = {
+                    timestamp: Date.now(),
+                    // Save the UA that was active when cf_clearance was issued.
+                    // Cloudflare binds cf_clearance to the exact User-Agent, so we
+                    // must restore it on restart or gotScraping requests will be rejected.
+                    userAgent: Config.userAgent,
+                    cookies,
+                };
+
+                await fs.mkdir(Config.dataDir, { recursive: true });
+                await fs.writeFile(this.cookiesPath, JSON.stringify(cookieData, null, 2));
+
+                console.log('[Animepahe] ✅ Cookies refreshed');
+            } catch (error) {
+                console.error('[Animepahe] Cookie refresh error:', error.message);
+                throw new CustomError(`Failed to refresh cookies: ${error.message}`, 503);
+            } finally {
+                this.isRefreshingCookies = false;
+                this._refreshPromise = null;
+            }
+        })();
+
+        return this._refreshPromise;
     }
 
     async getCookies(userProvidedCookies = null) {

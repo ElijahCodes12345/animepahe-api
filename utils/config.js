@@ -1,4 +1,5 @@
 const dotenv = require('dotenv');
+const path = require('path');
 dotenv.config();
 
 class Config {
@@ -19,6 +20,13 @@ class Config {
         this.cookiesRefreshInterval = 14 * 24 * 60 * 60 * 1000;
         this.proxies = [];
         this.proxyEnabled = false;
+        
+        // Persistent data directory for cookies and other state.
+        // Defaults to the library's own data/ folder, but consuming apps
+        // should override this to a path outside node_modules so it
+        // survives npm installs and reinstalls.
+        // e.g. animepahe.Config.dataDir = path.join(process.cwd(), 'data/animepahe');
+        this.dataDir = path.join(__dirname, '../data');
         
         // Environment-specific settings
         this.isServerless = !!(process.env.VERCEL || process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME);
