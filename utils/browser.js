@@ -127,8 +127,9 @@ class BrowserService {
         const execPath     = this._getChromePath();
 
         const args = [
-            '--no-sandbox',
             '--disable-blink-features=AutomationControlled',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
             '--window-size=1366,768',
             '--disable-infobars',
             '--no-first-run',
@@ -143,7 +144,11 @@ class BrowserService {
 
         console.log('[BrowserService] Launching Chrome via patchright...');
 
-        const ctx = await chromium.launchPersistentContext(profileDir, {
+        // If Config.dataDir is set (by aniempire-api), we use that persistent profile location.
+        // Otherwise, use our default local profileDir.
+        const useDataDir = Config.dataDir || profileDir;
+
+        const ctx = await chromium.launchPersistentContext(useDataDir, {
             executablePath: execPath,
             headless:       false,
             viewport:       { width: 1366, height: 768 },
