@@ -235,13 +235,9 @@ class BrowserService {
             await page.bringToFront().catch(() => {});
 
             try {
-                // Cloudflare often returns HTTP 403/503 alongside the challenge page.
-                // Playwright's goto() throws an error (e.g. ERR_HTTP_RESPONSE_CODE_FAILURE)
-                // when it sees these error codes, even if the Turnstile page loaded fine.
-                // We ignore all navigation errors here and let _solveChallenge inspect the page.
                 await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
             } catch (e) {
-                console.log(`[BrowserService] Navigation error (ignoring): ${e.message.split('\\n')[0]}`);
+                if (!e.message.includes('Timeout')) throw e;
             }
 
             await this._solveChallenge(page, url, navTimeout);
