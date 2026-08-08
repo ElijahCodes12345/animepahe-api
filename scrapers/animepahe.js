@@ -21,6 +21,17 @@ class Animepahe {
 
         // tracking for current kwik request
         this.currentKwikRequest = null;
+
+        // ── CF bypass circuit breaker ─────────────────────────────────────────
+        // Prevents AnimePahe from repeatedly locking the shared browser for 120s
+        // on every request when CF is actively blocking it.
+        // After CF_FAIL_THRESHOLD consecutive failures, skip the browser for
+        // CF_COOLDOWN_MS — the orchestrator then falls through to Koto instantly.
+        this._cfFailCount = 0;
+        this._cfCircuitOpenAt = null;   // timestamp when circuit tripped
+        this._CF_FAIL_THRESHOLD = 2;    // open after 2 consecutive failures
+        this._CF_COOLDOWN_MS = 5 * 60 * 1000; // 5-minute cooldown
+        // ─────────────────────────────────────────────────────────────────────
     }
 
     get cookiesPath() {
@@ -52,6 +63,24 @@ class Animepahe {
     }        
     
     async refreshCookies() {
+        // ── Circuit breaker check ─────────────────────────────────────────────
+        // If CF has failed repeatedly, skip the browser entirely for the cooldown
+        // period. This lets the orchestrator fall through to Koto immediately
+        // instead of waiting 120s for every failing CF bypass attempt.
+        if (this._cfCircuitOpenAt !== null) {
+            const age = Date.now() - this._cfCircuitOpenAt;
+            if (age < this._CF_COOLDOWN_MS) {
+                const remainingSec = Math.ceil((this._CF_COOLDOWN_MS - age) / 1000);
+                console.warn(`[Animepahe] ⚡ Circuit breaker OPEN — skipping CF bypass for ${remainingSec}s more (${this._cfFailCount} consecutive failures). Koto will be used instead.`);
+                throw new CustomError(`CF bypass circuit open — cooling down for ${remainingSec}s`, 503);
+            } else {
+                // Cooldown expired — give it another try
+                console.log('[Animepahe] Circuit breaker cooldown expired. Retrying CF bypass...');
+                this._cfCircuitOpenAt = null;
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         // Deduplicate concurrent refresh calls — all callers share the same
         // promise so only ONE browser is ever launched at a time.
         if (this._refreshPromise) {
@@ -86,8 +115,19 @@ class Animepahe {
                 await fs.mkdir(Config.dataDir, { recursive: true });
                 await fs.writeFile(this.cookiesPath, JSON.stringify(cookieData, null, 2));
 
+                // ── Success — reset circuit breaker ───────────────────────────
+                this._cfFailCount = 0;
+                this._cfCircuitOpenAt = null;
+                // ─────────────────────────────────────────────────────────────
                 console.log('[Animepahe] ✅ Cookies refreshed');
             } catch (error) {
+                // ── Failure — increment circuit breaker counter ───────────────
+                this._cfFailCount += 1;
+                if (this._cfFailCount >= this._CF_FAIL_THRESHOLD && this._cfCircuitOpenAt === null) {
+                    this._cfCircuitOpenAt = Date.now();
+                    console.warn(`[Animepahe] ⚡ Circuit breaker TRIPPED after ${this._cfFailCount} consecutive CF failures. Blocking for ${this._CF_COOLDOWN_MS / 60000}min.`);
+                }
+                // ─────────────────────────────────────────────────────────────
                 console.error('[Animepahe] Cookie refresh error:', error.message);
                 throw new CustomError(`Failed to refresh cookies: ${error.message}`, 503);
             } finally {
@@ -298,10 +338,18 @@ class Animepahe {
 
         console.log('Initiating iframe HTML fetch:', url);
 
+        // Build the play page URL to use as the Referer.
+        // kwik.cx is NOT Cloudflare-protected — it's referrer-gated.
+        // It checks that the request comes from an animepahe play page, NOT the home page.
+        // Using the home URL as Referer causes kwik to return "Attention Required!".
+        const playPageUrl = (id && episodeId)
+            ? Config.getUrl('play', id, episodeId)
+            : Config.getUrl('home');
+
         // To add more strategies in the future, add them to this array:
         const allStrategies = [
-            () => this.scrapeIframeLight(url),
-            () => this.scrapeIframePlaywright(url),
+            () => this.scrapeIframeLight(url, playPageUrl),
+            () => this.scrapeIframePlaywright(url, playPageUrl),
         ];
 
         const errors = [];
@@ -320,6 +368,33 @@ class Animepahe {
                 throw new Error('Result too short or invalid');
             } catch (error) {
                 console.warn(`Strategy ${i + 1} failed:`, error.message);
+                
+                // kwik.cx is referrer-gated, NOT Cloudflare-protected.
+                // BrowserService (patchright) always fails on it with "Response blocked" because
+                // the browser context doesn't carry the animepahe play-page session cookie.
+                // If GotScraping times out or gets a network error, skip BrowserService entirely.
+                const isKwikUrl = url && url.includes('kwik.');
+                if (isKwikUrl) {
+                    console.warn(`[fetchIframeHtml] kwik.cx URL — skipping BrowserService escalation (strategy 2 always fails here).`);
+                    throw new CustomError(`GotScraping failed for kwik.cx: ${error.message}`, 503);
+                }
+
+                // For other sites, don't escalate on hard network errors — browser will fail too
+                const isNetworkError = error.message && (
+                    error.message.includes('ECONNRESET') || 
+                    error.message.includes('ECONNABORTED') || 
+                    error.message.includes('ETIMEDOUT') || 
+                    error.message.includes('ENOTFOUND') ||
+                    error.message.includes('EHOSTUNREACH') ||
+                    error.message.includes('Timeout awaiting') ||
+                    error.message.includes('ECONNREFUSED')
+                );
+                
+                if (isNetworkError) {
+                    console.warn(`[fetchIframeHtml] Hard network error detected (${error.message}). Skipping browser escalation.`);
+                    throw new CustomError(`Network error fetching iframe: ${error.message}`, 502);
+                }
+                
                 errors.push(`Strategy ${i + 1}: ${error.message}`);
             }
         }
@@ -671,10 +746,14 @@ class Animepahe {
         return null;
     }
  
-    async scrapeIframeLight(url) {
+    async scrapeIframeLight(url, referer = null) {
         try {
+            // kwik.cx pages are lightweight — 15s is sufficient and fails faster
+            // than the default 30s when kwik is rate-limiting or slow.
+            const isKwik = url && url.includes('kwik.');
             const html = await RequestManager.scrapeWithGotScraping(url, {
-                referer: Config.getUrl("home")
+                referer: referer || Config.getUrl("home"),
+                timeout: isKwik ? 15000 : 30000,
             });
             
             if (html && html.toLowerCase().includes('attention required!')) {
@@ -694,10 +773,10 @@ class Animepahe {
         }
     }
 
-    async scrapeIframePlaywright(url) {
+    async scrapeIframePlaywright(url, referer = null) {
         try {
             const html = await RequestManager.scrapeWithPlaywrightPage(url, {
-                referer: Config.getUrl("home")
+                referer: referer || Config.getUrl("home")
             });
 
             if (html && html.toLowerCase().includes('attention required!')) {

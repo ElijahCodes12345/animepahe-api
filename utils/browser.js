@@ -127,9 +127,8 @@ class BrowserService {
         const execPath     = this._getChromePath();
 
         const args = [
-            '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
-            '--disable-setuid-sandbox',
+            '--disable-blink-features=AutomationControlled',
             '--window-size=1366,768',
             '--disable-infobars',
             '--no-first-run',
@@ -144,11 +143,7 @@ class BrowserService {
 
         console.log('[BrowserService] Launching Chrome via patchright...');
 
-        // If Config.dataDir is set (by aniempire-api), we use that persistent profile location.
-        // Otherwise, use our default local profileDir.
-        const useDataDir = Config.dataDir || profileDir;
-
-        const ctx = await chromium.launchPersistentContext(useDataDir, {
+        const ctx = await chromium.launchPersistentContext(profileDir, {
             executablePath: execPath,
             headless:       false,
             viewport:       { width: 1366, height: 768 },
@@ -204,9 +199,24 @@ class BrowserService {
      */
     async render(url, options = {}) {
         const ctx = await this._ensureContext(!!options.forceDirect);
-        const page = await ctx.newPage();
+        let page;
+        try {
+            page = await ctx.newPage();
+        } catch (ctxErr) {
+            // Race: idle timer closed the context between _ensureContext and newPage().
+            // Null the stale reference and re-launch, then retry once.
+            const msg = ctxErr?.message || '';
+            if (msg.includes('closed') || msg.includes('Target page') || msg.includes('destroyed')) {
+                console.warn('[BrowserService] Context was closed mid-request (idle race). Re-launching...');
+                this.context = null;
+                const freshCtx = await this._ensureContext(!!options.forceDirect);
+                page = await freshCtx.newPage();
+            } else {
+                throw ctxErr;
+            }
+        }
 
-        const navTimeout = options.timeout || 120000;
+        const navTimeout = options.timeout || 120000; // max 120s — respect slow networks
 
         try {
             // Cookie freshness guard: clear expired cf_clearance before navigating
@@ -235,35 +245,47 @@ class BrowserService {
             await page.bringToFront().catch(() => {});
 
             try {
-                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
             } catch (e) {
                 if (!e.message.includes('Timeout')) throw e;
             }
 
             await this._solveChallenge(page, url, navTimeout);
 
-            // Post-solve guard: if still on CF challenge, one final networkidle navigate
+            // Post-solve guard: if still on CF challenge page, do one final networkidle navigate
             const postTitle = await page.title().catch(() => '');
             const postUrl   = page.url();
             if (postTitle.includes('Just a moment') ||
                 postUrl.includes('cf_chl_rt_tk') ||
                 postUrl.includes('cf_chl_f_tk')) {
-                try { await page.goto(url, { waitUntil: 'networkidle', timeout: 25000 }); } catch (_) {}
+                try { await page.goto(url, { waitUntil: 'networkidle', timeout: 40000 }); } catch (_) {}
             }
 
-            // Final check — if still challenged after all attempts, fail hard
             const finalTitle = await page.title().catch(() => '');
             const finalUrl   = page.url();
-            if (finalTitle.includes('Just a moment') ||
-                finalUrl.includes('cf_chl_rt_tk') ||
-                finalUrl.includes('cf_chl_f_tk')) {
+
+            // Collect cookies: prefer the URL-scoped set, but if empty (page loaded
+            // cleanly without a fresh CF challenge) fall back to all context cookies
+            // so we never return an empty jar when cookies exist on the context.
+            let finalCookies = await ctx.cookies(url);
+            if (!finalCookies || finalCookies.length === 0) {
+                finalCookies = await ctx.cookies().catch(() => []);
+            }
+            const hasClearance = finalCookies.some(c => c.name === 'cf_clearance');
+
+            // Trust cf_clearance over page title — Animepahe's redirect chain can
+            // momentarily show "Just a moment" even after a successful solve.
+            // If we have the clearance cookie, the HTTP clients (GotScraping/axios) can use it.
+            if (!hasClearance &&
+                (finalTitle.includes('Just a moment') ||
+                 finalUrl.includes('cf_chl_rt_tk') ||
+                 finalUrl.includes('cf_chl_f_tk'))) {
                 throw new Error('[BrowserService] Could not bypass Cloudflare — still on challenge page');
             }
 
             const content = await page.content();
-            const cookies = await ctx.cookies(url);
 
-            return { content, cookies, url: finalUrl, status: 200 };
+            return { content, cookies: finalCookies, url: finalUrl, status: 200 };
         } finally {
             await page.close().catch(() => {});
             this._resetIdleTimer();
@@ -320,41 +342,43 @@ class BrowserService {
 
             if (hasClearance) {
                 if (!clearanceSeenAt) {
-                    console.log('[BrowserService] 🌟 cf_clearance acquired — waiting for page transition...');
                     clearanceSeenAt = Date.now();
-                }
-
-                // Wait 45s before first reload — each reload presents a harder fresh Turnstile
-                if (Date.now() - clearanceSeenAt > 45000) {
-                    if (reloadCount < 1) {
+                    console.log('[BrowserService] 🌟 cf_clearance acquired — navigating target...');
+                    try {
+                        await page.goto(originalUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                    } catch (_) {}
+                    // Give the page a moment to settle after the redirect
+                    await new Promise(r => setTimeout(r, 3000));
+                } else if (Date.now() - clearanceSeenAt > 20000) {
+                    // Waited 20s with clearance and still challenged — reload up to 3 times
+                    if (reloadCount < 3) {
                         reloadCount++;
-                        console.log(`[BrowserService] 🔄 Stuck with clearance — reloading (${reloadCount}/1)...`);
-                        if (cursor) await cursor.moveTo({ x: 500 + Math.random() * 200, y: 300 + Math.random() * 200 }).catch(() => {});
-                        try { await page.goto(originalUrl, { waitUntil: 'networkidle', timeout: 30000 }); } catch (_) {}
+                        console.log(`[BrowserService] 🔄 Reload ${reloadCount}/3 with clearance (title: "${title}")...`);
+                        try { await page.goto(originalUrl, { waitUntil: 'networkidle', timeout: 40000 }); } catch (_) {}
                         clearanceSeenAt = Date.now();
-                        lastTurnstileClick = 0; // allow immediate click on fresh page
                         await new Promise(r => setTimeout(r, 3000));
-                        continue;
                     } else {
-                        console.log(`[BrowserService] ⚠️  Returning with cf_clearance (title: "${title}", url: ${page.url()})`);
+                        // Have the cookie — return and let HTTP clients use it directly
+                        console.log(`[BrowserService] ⚠️ Returning with cf_clearance (title: "${title}", url: ${page.url()})`);
                         return;
-                    }
-                } else {
-                    if (cursor && Math.random() > 0.5) {
-                        await cursor.moveTo({ x: 400 + Math.random() * 400, y: 200 + Math.random() * 400 }).catch(() => {});
                     }
                 }
             }
 
-            // Try clicking Turnstile every 8s.
-            // If the click lands, reset clearanceSeenAt so the reload timer
-            // restarts — the page may already be transitioning away.
-            if (Date.now() - lastTurnstileClick > 8000) {
+            // Always try clicking the Turnstile checkbox on every loop iteration.
+            // Reloads can present a fresh challenge even after cf_clearance is acquired,
+            // so we must keep clicking regardless of clearance state (mirrors Katalyst).
+            if (Date.now() - lastTurnstileClick > 5000) {
                 const clicked = await this._tryClickTurnstile(page, cursor);
-                if (clicked && clearanceSeenAt) {
-                    clearanceSeenAt = Date.now();
+                if (clicked) {
+                    lastTurnstileClick = Date.now();
+                    // Reset reload timer so CF has time to verify the click before we reload.
+                    // Without this, the 20s window fires mid-verification and resets the challenge.
+                    if (clearanceSeenAt) clearanceSeenAt = Date.now();
+                    console.log('[BrowserService] ⏳ Waiting for CF to verify Turnstile click...');
+                    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+                    continue; // re-evaluate page state immediately — don't sleep
                 }
-                lastTurnstileClick = Date.now();
             }
 
             await new Promise(r => setTimeout(r, 1500));
@@ -383,9 +407,9 @@ class BrowserService {
                 // Method 1: click input[type="checkbox"] via locator (longer timeout to allow widget init)
                 try {
                     const checkbox = frame.locator('input[type="checkbox"]');
-                    if (await checkbox.count({ timeout: 4000 }) > 0) {
-                        await checkbox.first().scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
-                        await checkbox.first().click({ delay: 80 + Math.random() * 120, timeout: 5000 });
+                    if (await checkbox.count({ timeout: 8000 }) > 0) {
+                        await checkbox.first().scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
+                        await checkbox.first().click({ delay: 80 + Math.random() * 120, timeout: 8000 });
                         console.log('[BrowserService] 👆 Clicked Turnstile checkbox via locator');
                         return true;
                     }
