@@ -3,6 +3,7 @@ const axios = require('axios');
 const Config = require('./config');
 const { CustomError } = require('../middleware/errorHandler');
 
+
 class RequestManager {
     static getPlaywrightProxyOptions(proxyString) {
         if (!proxyString) return null;
@@ -210,8 +211,18 @@ class RequestManager {
                 timeout: { request: options.timeout || 30000 }
             });
 
-            // Detect Cloudflare challenge in HTML scrape responses too
             const body = response.body || '';
+
+            // Check for definitive HTTP errors before CF challenge detection.
+            // This prevents a 404 (wrong/non-existent page) from being misdiagnosed as a Cloudflare challenge when cookies are also stale.
+            if (response.statusCode === 404) {
+                throw new CustomError('Page not found (404) — check that the anime ID is correct', 404);
+            }
+            if (response.statusCode === 403) {
+                throw new CustomError('Access forbidden (403)', 403);
+            }
+
+            // Detect Cloudflare challenge in HTML scrape responses too
             if (body.includes('Just a moment') ||
                 body.includes('challenge-running') ||
                 body.includes('cf-please-wait')) {

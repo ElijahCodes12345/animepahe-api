@@ -263,6 +263,9 @@ class Animepahe {
             if (!html) throw new CustomError('Failed to fetch anime info', 503);
             return html;
         } catch (error) {
+            // 404 — do NOT retry or refresh cookies.
+            if (error.statusCode === 404) throw error;
+
             // If we got a CF challenge, refresh cookies and retry once
             const isChallenge = error.message && error.message.includes('Anti-bot challenge');
             if (isChallenge && !this._retryingScrape) {
