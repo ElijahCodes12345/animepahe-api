@@ -22,6 +22,7 @@ class Animepahe {
         // tracking for current kwik request
         this.currentKwikRequest = null;
 
+
         // ── CF bypass circuit breaker ─────────────────────────────────────────
         // Prevents AnimePahe from repeatedly locking the shared browser for 120s
         // on every request when CF is actively blocking it.
@@ -168,7 +169,9 @@ class Animepahe {
         //   (a) cookies are older than the refresh interval, OR
         //   (b) cf_clearance is missing entirely (browser challenge was never solved)
         if ((ageInMs > this.cookiesRefreshInterval || !hasCfClearance) && !this.isRefreshingCookies) {
-            console.log(`[Animepahe] Cookies need refresh (age: ${Math.round(ageInMs / 86400000)}d, hasCfClearance: ${hasCfClearance}). Refreshing now...`);
+            const reason = !hasCfClearance ? 'missing cf_clearance'
+                : `age: ${Math.round(ageInMs / 86400000)}d`;
+            console.log(`[Animepahe] Cookies need refresh (${reason}). Refreshing now...`);
             await this.refreshCookies();
             cookieData = JSON.parse(await fs.readFile(this.cookiesPath, 'utf8'));
         } else if (ageInMs > (this.cookiesRefreshInterval - 24 * 60 * 60 * 1000) && !this.isRefreshingCookies) {
@@ -193,6 +196,7 @@ class Animepahe {
         Config.setCookies(cookieHeader);
         return cookieHeader;
     }
+
 
     async fetchApiData(endpoint, params = {}, userProvidedCookies = null) {
         try {

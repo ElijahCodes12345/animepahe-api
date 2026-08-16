@@ -218,15 +218,20 @@ class RequestManager {
             if (response.statusCode === 404) {
                 throw new CustomError('Page not found (404) — check that the anime ID is correct', 404);
             }
-            if (response.statusCode === 403) {
-                throw new CustomError('Access forbidden (403)', 403);
-            }
 
             // Detect Cloudflare challenge in HTML scrape responses too
             if (body.includes('Just a moment') ||
                 body.includes('challenge-running') ||
                 body.includes('cf-please-wait')) {
                 throw new Error('Anti-bot challenge active — cookies may be stale (Status Code: 503)');
+            }
+
+            // A 403 after a server restart almost always means CF is presenting a
+            // fresh challenge (the old cf_clearance was tied to the previous browser
+            // session). Treat it as a retryable challenge so callers can refresh
+            // cookies + retry, rather than surfacing a hard 403 to the end user.
+            if (response.statusCode === 403) {
+                throw new Error('Anti-bot challenge active — cookies may be stale (Status Code: 403)');
             }
 
             return body;
