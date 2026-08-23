@@ -320,6 +320,14 @@ class RequestManager {
 
         // 3. Lightweight got-scraping request with the CF cookies
         const { gotScraping } = await import('got-scraping');
+
+        // Derive the actual Chrome major version from the User-Agent that patchright
+        // reported. cf_clearance is bound to the exact version — sending a different
+        // version in sec-ch-ua causes CF to treat it as a fingerprint mismatch.
+        const uaVersionMatch = Config.userAgent?.match(/Chrome\/(\d+)/);
+        const chromeMajor = uaVersionMatch ? parseInt(uaVersionMatch[1], 10) : 124;
+        const secChUa = `"Not A(Brand";v="99", "Chromium";v="${chromeMajor}", "Google Chrome";v="${chromeMajor}"`;
+
         const response = await gotScraping({
             url: fullUrl,
             headers: {
@@ -328,7 +336,7 @@ class RequestManager {
                 'Referer': Config.getUrl('home'),
                 'User-Agent': Config.userAgent,
                 'dnt': '1',
-                'sec-ch-ua': '"Not A(Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
+                'sec-ch-ua': secChUa,
                 'sec-ch-ua-mobile': '?0',
                 'sec-ch-ua-platform': '"Windows"',
                 'sec-fetch-dest': 'empty',
@@ -338,7 +346,7 @@ class RequestManager {
                 'Cookie': cookieHeader,
             },
             headerGeneratorOptions: {
-                browsers: [{ name: 'chrome', minVersion: 124 }],
+                browsers: [{ name: 'chrome', minVersion: chromeMajor, maxVersion: chromeMajor }],
                 devices: ['desktop'],
                 locales: ['en-US'],
                 operatingSystems: ['windows'],

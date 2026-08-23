@@ -30,7 +30,7 @@ class Animepahe {
         // CF_COOLDOWN_MS — the orchestrator then falls through to Koto instantly.
         this._cfFailCount = 0;
         this._cfCircuitOpenAt = null;   // timestamp when circuit tripped
-        this._CF_FAIL_THRESHOLD = 2;    // open after 2 consecutive failures
+        this._CF_FAIL_THRESHOLD = 3;    // open after 3 consecutive failures
         this._CF_COOLDOWN_MS = 5 * 60 * 1000; // 5-minute cooldown
         // ─────────────────────────────────────────────────────────────────────
     }
