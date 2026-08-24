@@ -454,13 +454,6 @@ class PlayModel {
                 try {
                     const sources = await Animepahe.scrapeIframe(id, episodeId, data.url);
                     
-                    // extractSources returns null when no m3u8 could be found —
-                    // guard against null.map() which would crash the entire batch.
-                    if (!sources || !Array.isArray(sources)) {
-                        console.warn(`[processHybrid] No m3u8 resolved for ${data.resolution} — skipping.`);
-                        return [];
-                    }
-
                     return sources.map(source => ({
                         ...source,
                         embed: data.embed,

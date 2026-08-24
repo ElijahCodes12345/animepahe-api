@@ -30,7 +30,7 @@ class Animepahe {
         // CF_COOLDOWN_MS — the orchestrator then falls through to Koto instantly.
         this._cfFailCount = 0;
         this._cfCircuitOpenAt = null;   // timestamp when circuit tripped
-        this._CF_FAIL_THRESHOLD = 3;    // open after 3 consecutive failures
+        this._CF_FAIL_THRESHOLD = 2;    // open after 2 consecutive failures
         this._CF_COOLDOWN_MS = 5 * 60 * 1000; // 5-minute cooldown
         // ─────────────────────────────────────────────────────────────────────
     }
@@ -123,35 +123,14 @@ class Animepahe {
                 console.log('[Animepahe] ✅ Cookies refreshed');
             } catch (error) {
                 // ── Failure — increment circuit breaker counter ───────────────
-                // Only count genuine CF challenge failures, NOT network-level errors
-                // (ERR_CONNECTION_RESET, ECONNRESET, etc.). Network errors mean the
-                // site is unreachable at the TCP/DNS level — the browser never even
-                // got a chance to solve a CF challenge, so tripping the circuit
-                // breaker would block AnimePahe for 5min for an unrelated reason.
-                const isNetworkErr = error.message && (
-                    error.message.includes('net::ERR_') ||
-                    error.message.includes('ERR_CONNECTION_RESET') ||
-                    error.message.includes('ERR_CONNECTION_REFUSED') ||
-                    error.message.includes('ERR_TIMED_OUT') ||
-                    error.message.includes('ERR_NAME_NOT_RESOLVED') ||
-                    error.message.includes('ECONNRESET') ||
-                    error.message.includes('ECONNREFUSED') ||
-                    error.message.includes('ENOTFOUND') ||
-                    error.message.includes('ETIMEDOUT')
-                );
-                if (!isNetworkErr) {
-                    this._cfFailCount += 1;
-                    if (this._cfFailCount >= this._CF_FAIL_THRESHOLD && this._cfCircuitOpenAt === null) {
-                        this._cfCircuitOpenAt = Date.now();
-                        console.warn(`[Animepahe] ⚡ Circuit breaker TRIPPED after ${this._cfFailCount} consecutive CF failures. Blocking for ${this._CF_COOLDOWN_MS / 60000}min.`);
-                    }
-                } else {
-                    console.warn(`[Animepahe] Network error during cookie refresh (not counting toward circuit breaker): ${error.message.split('\n')[0]}`);
+                this._cfFailCount += 1;
+                if (this._cfFailCount >= this._CF_FAIL_THRESHOLD && this._cfCircuitOpenAt === null) {
+                    this._cfCircuitOpenAt = Date.now();
+                    console.warn(`[Animepahe] ⚡ Circuit breaker TRIPPED after ${this._cfFailCount} consecutive CF failures. Blocking for ${this._CF_COOLDOWN_MS / 60000}min.`);
                 }
                 // ─────────────────────────────────────────────────────────────
-                console.error('[Animepahe] Cookie refresh error:', error.message.split('\n')[0]);
+                console.error('[Animepahe] Cookie refresh error:', error.message);
                 throw new CustomError(`Failed to refresh cookies: ${error.message}`, 503);
-
             } finally {
                 this.isRefreshingCookies = false;
                 this._refreshPromise = null;
